@@ -1,14 +1,13 @@
 // /api/admin/members — GET (list), POST (create), PATCH (edit/revoke)
-// MUST sit behind real auth — requireAdmin() below is a stub. Do not deploy
-// this route to a client-facing app until it verifies a real session/JWT.
+// Auth: reads the admin_token httpOnly cookie set by /api/admin/login.
 import { sql } from "../../../lib/db";
+import { verifyAdminToken } from "../../../lib/auth";
 import crypto from "crypto";
 
-async function requireAdmin(req) {
-  const token = req.headers.authorization?.replace("Bearer ", "");
-  if (!token) throw new Error("unauthorized");
-  // TODO: verify token against your session store / JWT secret, return admin row.
-  return { id: "ADMIN_ID_FROM_TOKEN", role: "admin" };
+function requireAdmin(req) {
+  const payload = verifyAdminToken(req.cookies?.admin_token);
+  if (!payload) throw new Error("unauthorized");
+  return payload;
 }
 
 function generateRegNo() {
@@ -20,7 +19,7 @@ function generateRegNo() {
 export default async function handler(req, res) {
   let admin;
   try {
-    admin = await requireAdmin(req);
+    admin = requireAdmin(req);
   } catch {
     return res.status(401).json({ error: "Unauthorized" });
   }
@@ -31,7 +30,7 @@ export default async function handler(req, res) {
   }
 
   if (req.method === "POST") {
-    const body = req.body;
+    const body = req.body || {};
     const reg_no = generateRegNo();
 
     const [member] = await sql`
@@ -51,14 +50,14 @@ export default async function handler(req, res) {
 
     await sql`
       INSERT INTO member_audit_log (member_id, admin_id, action, detail)
-      VALUES (${member.id}, ${admin.id}, 'created', ${JSON.stringify({ by: admin.id })})
+      VALUES (${member.id}, ${admin.id}, 'created', ${JSON.stringify({ by: admin.email })})
     `;
 
     return res.status(201).json({ member });
   }
 
   if (req.method === "PATCH") {
-    const { id, status, reason } = req.body;
+    const { id, status, reason } = req.body || {};
 
     if (status) {
       await sql`
@@ -70,7 +69,7 @@ export default async function handler(req, res) {
       `;
       await sql`
         INSERT INTO member_audit_log (member_id, admin_id, action, detail)
-        VALUES (${id}, ${admin.id}, ${status === "revoked" ? "revoked" : "edited"}, ${JSON.stringify({ status, reason })})
+        VALUES (${id}, ${admin.id}, ${status === "revoked" ? "revoked" : "edited"}, ${JSON.stringify({ status, reason, by: admin.email })})
       `;
     }
 
