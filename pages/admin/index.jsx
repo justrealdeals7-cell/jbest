@@ -1,6 +1,8 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/router";
 import Link from "next/link";
+import LocationSelects from "../../components/LocationSelects";
+import { TITLE_OPTIONS, GENDER_OPTIONS } from "../../lib/nigeria";
 
 export default function AdminDashboard() {
   const router = useRouter();
@@ -8,6 +10,7 @@ export default function AdminDashboard() {
   const [loading, setLoading] = useState(true);
   const [showForm, setShowForm] = useState(false);
   const [me, setMe] = useState(null);
+  const [search, setSearch] = useState("");
 
   useEffect(() => {
     fetch("/api/admin/me")
@@ -24,6 +27,16 @@ export default function AdminDashboard() {
     setMembers(data.members || []);
     setLoading(false);
   }
+
+  const filteredMembers = useMemo(() => {
+    if (!search.trim()) return members;
+    const term = search.trim().toLowerCase();
+    return members.filter((m) =>
+      [m.full_name, m.reg_no, m.reg_state, m.reg_lga].some(
+        (v) => v && v.toLowerCase().includes(term)
+      )
+    );
+  }, [members, search]);
 
   async function handleRevoke(id) {
     if (!confirm("Revoke this member's card? This cannot be undone from here.")) return;
@@ -46,6 +59,8 @@ export default function AdminDashboard() {
   }
 
   const canRevoke = me?.role === "admin" || me?.role === "super_admin";
+  const canEdit = me?.role === "admin" || me?.role === "super_admin";
+  const isSuperAdmin = me?.role === "super_admin";
 
   return (
     <div style={styles.wrap}>
@@ -55,6 +70,9 @@ export default function AdminDashboard() {
           {me && <p style={styles.whoami}>Logged in as {me.email} · {me.role}</p>}
         </div>
         <div>
+          {isSuperAdmin && (
+            <Link href="/admin/admins" style={styles.manageLink}>Manage Admins</Link>
+          )}
           <button style={styles.addBtn} onClick={() => setShowForm((s) => !s)}>
             {showForm ? "Close" : "+ Add member"}
           </button>
@@ -65,6 +83,13 @@ export default function AdminDashboard() {
       {showForm && (
         <AddMemberForm onCreated={() => { setShowForm(false); loadMembers(); }} />
       )}
+
+      <input
+        style={styles.searchInput}
+        placeholder="Search by name, reg no, state, or LGA…"
+        value={search}
+        onChange={(e) => setSearch(e.target.value)}
+      />
 
       {loading ? (
         <p>Loading…</p>
@@ -81,7 +106,7 @@ export default function AdminDashboard() {
             </tr>
           </thead>
           <tbody>
-            {members.map((m) => (
+            {filteredMembers.map((m) => (
               <tr key={m.id}>
                 <td style={styles.td}>
                   {m.photo_url ? (
@@ -105,15 +130,18 @@ export default function AdminDashboard() {
                   </span>
                 </td>
                 <td style={{ ...styles.td, whiteSpace: "nowrap" }}>
-                  <Link href={`/admin/card/${m.id}`} style={styles.viewLink}>View card</Link>
+                  <Link href={`/admin/card/${m.id}`} style={styles.viewLink}>View</Link>
+                  {canEdit && (
+                    <Link href={`/admin/members/${m.id}/edit`} style={styles.viewLink}>Edit</Link>
+                  )}
                   {m.status === "active" && canRevoke && (
                     <button style={styles.revokeBtn} onClick={() => handleRevoke(m.id)}>Revoke</button>
                   )}
                 </td>
               </tr>
             ))}
-            {members.length === 0 && (
-              <tr><td style={styles.td} colSpan={6}>No members yet.</td></tr>
+            {filteredMembers.length === 0 && (
+              <tr><td style={styles.td} colSpan={6}>No members found.</td></tr>
             )}
           </tbody>
         </table>
@@ -130,8 +158,8 @@ function AddMemberForm({ onCreated }) {
   const [uploading, setUploading] = useState(false);
   const [error, setError] = useState("");
 
-  function set(field) {
-    return (e) => setForm((f) => ({ ...f, [field]: e.target.value }));
+  function setField(key, value) {
+    setForm((f) => ({ ...f, [key]: value }));
   }
 
   function handlePhotoChange(e) {
@@ -188,15 +216,6 @@ function AddMemberForm({ onCreated }) {
     onCreated();
   }
 
-  const fields = [
-    ["full_name", "Full name"], ["title", "Title"], ["gender", "Gender"],
-    ["phone", "Phone"], ["email", "Email"], ["occupation", "Occupation"],
-    ["origin_state", "Origin state"], ["origin_lga", "Origin LGA"],
-    ["residence_state", "Residence state"], ["residence_lga", "Residence LGA"],
-    ["reg_state", "Reg. state"], ["reg_lga", "Reg. LGA"],
-    ["ward", "Ward"], ["polling_unit", "Polling unit"], ["polling_unit_name", "Polling unit name"],
-  ];
-
   return (
     <form onSubmit={handleSubmit} style={styles.formGrid}>
       <div style={styles.photoField}>
@@ -208,15 +227,29 @@ function AddMemberForm({ onCreated }) {
         <input type="file" accept="image/*" onChange={handlePhotoChange} />
       </div>
 
-      {fields.map(([key, label]) => (
-        <input
-          key={key}
-          placeholder={label}
-          style={styles.input}
-          value={form[key] || ""}
-          onChange={set(key)}
-        />
-      ))}
+      <input style={styles.input} placeholder="Full name" value={form.full_name || ""} onChange={(e) => setField("full_name", e.target.value)} />
+
+      <select style={styles.input} value={form.title || ""} onChange={(e) => setField("title", e.target.value)}>
+        <option value="">Title</option>
+        {TITLE_OPTIONS.map((t) => <option key={t} value={t}>{t}</option>)}
+      </select>
+
+      <select style={styles.input} value={form.gender || ""} onChange={(e) => setField("gender", e.target.value)}>
+        <option value="">Gender</option>
+        {GENDER_OPTIONS.map((g) => <option key={g} value={g}>{g}</option>)}
+      </select>
+
+      <input style={styles.input} placeholder="Phone" value={form.phone || ""} onChange={(e) => setField("phone", e.target.value)} />
+      <input style={styles.input} placeholder="Email" value={form.email || ""} onChange={(e) => setField("email", e.target.value)} />
+      <input style={styles.input} placeholder="Occupation" value={form.occupation || ""} onChange={(e) => setField("occupation", e.target.value)} />
+
+      <LocationSelects label="Origin" form={form} setField={setField} stateKey="origin_state" lgaKey="origin_lga" inputStyle={styles.input} />
+      <LocationSelects label="Residence" form={form} setField={setField} stateKey="residence_state" lgaKey="residence_lga" inputStyle={styles.input} />
+      <LocationSelects label="Registration" form={form} setField={setField} stateKey="reg_state" lgaKey="reg_lga" inputStyle={styles.input} />
+
+      <input style={styles.input} placeholder="Ward" value={form.ward || ""} onChange={(e) => setField("ward", e.target.value)} />
+      <input style={styles.input} placeholder="Polling unit" value={form.polling_unit || ""} onChange={(e) => setField("polling_unit", e.target.value)} />
+      <input style={styles.input} placeholder="Polling unit name" value={form.polling_unit_name || ""} onChange={(e) => setField("polling_unit_name", e.target.value)} />
 
       {error && <p style={styles.error}>{error}</p>}
 
@@ -229,11 +262,13 @@ function AddMemberForm({ onCreated }) {
 
 const styles = {
   wrap: { fontFamily: "system-ui, sans-serif", padding: 24, maxWidth: 900, margin: "0 auto" },
-  headerRow: { display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 16 },
+  headerRow: { display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 16, flexWrap: "wrap", gap: 8 },
   title: { color: "#1A2E1A", margin: 0 },
   whoami: { color: "#7A7259", fontSize: 13, margin: "4px 0 0" },
+  manageLink: { marginRight: 8, color: "#1A2E1A", background: "#F3ECD8", border: "1px solid #E4D9B8", padding: "8px 14px", borderRadius: 6, fontWeight: 600, textDecoration: "none", fontSize: 13 },
   addBtn: { background: "#3E8E41", color: "#fff", border: "none", padding: "8px 14px", borderRadius: 6, fontWeight: 700, cursor: "pointer", marginRight: 8 },
   logoutBtn: { background: "#F3ECD8", color: "#1A2E1A", border: "1px solid #E4D9B8", padding: "8px 14px", borderRadius: 6, cursor: "pointer" },
+  searchInput: { width: "100%", padding: 10, borderRadius: 8, border: "1px solid #E4D9B8", marginBottom: 12, boxSizing: "border-box" },
   table: { width: "100%", borderCollapse: "collapse" },
   th: { textAlign: "left", padding: 8, borderBottom: "1px solid #E4D9B8", color: "#7A7259", fontSize: 13 },
   td: { padding: 8, borderBottom: "1px solid #F0EAD6" },
