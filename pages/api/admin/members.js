@@ -1,5 +1,7 @@
 // /api/admin/members — GET (list, or single via ?id=), POST (create), PATCH (edit/revoke)
 // Auth: reads the admin_token httpOnly cookie set by /api/admin/login.
+// Role rule: 'agent' can create members but cannot revoke — revoking
+// requires 'admin' or 'super_admin'.
 import { sql } from "../../../lib/db";
 import { verifyAdminToken } from "../../../lib/auth";
 import crypto from "crypto";
@@ -66,6 +68,10 @@ export default async function handler(req, res) {
 
   if (req.method === "PATCH") {
     const { id, status, reason } = req.body || {};
+
+    if (status === "revoked" && admin.role === "agent") {
+      return res.status(403).json({ error: "Agents cannot revoke members — ask an admin." });
+    }
 
     if (status) {
       await sql`

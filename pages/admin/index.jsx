@@ -7,8 +7,13 @@ export default function AdminDashboard() {
   const [members, setMembers] = useState([]);
   const [loading, setLoading] = useState(true);
   const [showForm, setShowForm] = useState(false);
+  const [me, setMe] = useState(null);
 
   useEffect(() => {
+    fetch("/api/admin/me")
+      .then((r) => (r.ok ? r.json() : Promise.reject()))
+      .then((data) => setMe(data.admin))
+      .catch(() => router.push("/admin/login"));
     loadMembers();
   }, []);
 
@@ -22,11 +27,16 @@ export default function AdminDashboard() {
 
   async function handleRevoke(id) {
     if (!confirm("Revoke this member's card? This cannot be undone from here.")) return;
-    await fetch("/api/admin/members", {
+    const res = await fetch("/api/admin/members", {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ id, status: "revoked", reason: "Revoked via admin panel" }),
     });
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      alert(data.error || "Could not revoke this member.");
+      return;
+    }
     loadMembers();
   }
 
@@ -35,10 +45,15 @@ export default function AdminDashboard() {
     router.push("/admin/login");
   }
 
+  const canRevoke = me?.role === "admin" || me?.role === "super_admin";
+
   return (
     <div style={styles.wrap}>
       <div style={styles.headerRow}>
-        <h1 style={styles.title}>Members</h1>
+        <div>
+          <h1 style={styles.title}>Members</h1>
+          {me && <p style={styles.whoami}>Logged in as {me.email} · {me.role}</p>}
+        </div>
         <div>
           <button style={styles.addBtn} onClick={() => setShowForm((s) => !s)}>
             {showForm ? "Close" : "+ Add member"}
@@ -91,7 +106,7 @@ export default function AdminDashboard() {
                 </td>
                 <td style={{ ...styles.td, whiteSpace: "nowrap" }}>
                   <Link href={`/admin/card/${m.id}`} style={styles.viewLink}>View card</Link>
-                  {m.status === "active" && (
+                  {m.status === "active" && canRevoke && (
                     <button style={styles.revokeBtn} onClick={() => handleRevoke(m.id)}>Revoke</button>
                   )}
                 </td>
@@ -214,8 +229,9 @@ function AddMemberForm({ onCreated }) {
 
 const styles = {
   wrap: { fontFamily: "system-ui, sans-serif", padding: 24, maxWidth: 900, margin: "0 auto" },
-  headerRow: { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 },
-  title: { color: "#1A2E1A" },
+  headerRow: { display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 16 },
+  title: { color: "#1A2E1A", margin: 0 },
+  whoami: { color: "#7A7259", fontSize: 13, margin: "4px 0 0" },
   addBtn: { background: "#3E8E41", color: "#fff", border: "none", padding: "8px 14px", borderRadius: 6, fontWeight: 700, cursor: "pointer", marginRight: 8 },
   logoutBtn: { background: "#F3ECD8", color: "#1A2E1A", border: "1px solid #E4D9B8", padding: "8px 14px", borderRadius: 6, cursor: "pointer" },
   table: { width: "100%", borderCollapse: "collapse" },

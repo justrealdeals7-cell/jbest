@@ -7,7 +7,7 @@ export default function CardViewPage() {
   const { id } = router.query;
   const [member, setMember] = useState(null);
   const [loading, setLoading] = useState(true);
-  const [exporting, setExporting] = useState(false);
+  const [exporting, setExporting] = useState(""); // "" | "image" | "pdf"
   const cardRef = useRef(null);
 
   useEffect(() => {
@@ -23,17 +23,35 @@ export default function CardViewPage() {
       });
   }, [id]);
 
-  async function handleDownload() {
-    if (!cardRef.current) return;
-    setExporting(true);
-    // Loaded on demand — no need to ship this to every page, only this one.
+  async function renderToCanvas() {
     const html2canvas = (await import("html2canvas")).default;
-    const canvas = await html2canvas(cardRef.current, { scale: 2, useCORS: true });
+    return html2canvas(cardRef.current, { scale: 2, useCORS: true });
+  }
+
+  async function handleDownloadImage() {
+    setExporting("image");
+    const canvas = await renderToCanvas();
     const link = document.createElement("a");
     link.download = `${member.reg_no}.png`;
     link.href = canvas.toDataURL("image/png");
     link.click();
-    setExporting(false);
+    setExporting("");
+  }
+
+  async function handleDownloadPdf() {
+    setExporting("pdf");
+    const canvas = await renderToCanvas();
+    const { jsPDF } = await import("jspdf");
+    const imgData = canvas.toDataURL("image/png");
+
+    const pdf = new jsPDF({
+      orientation: canvas.height > canvas.width ? "portrait" : "landscape",
+      unit: "px",
+      format: [canvas.width, canvas.height],
+    });
+    pdf.addImage(imgData, "PNG", 0, 0, canvas.width, canvas.height);
+    pdf.save(`${member.reg_no}.pdf`);
+    setExporting("");
   }
 
   if (loading) return <p style={styles.msg}>Loading…</p>;
@@ -58,9 +76,14 @@ export default function CardViewPage() {
         />
       </div>
 
-      <button style={styles.downloadBtn} onClick={handleDownload} disabled={exporting}>
-        {exporting ? "Preparing…" : "Download as image"}
-      </button>
+      <div style={styles.btnRow}>
+        <button style={styles.downloadBtn} onClick={handleDownloadImage} disabled={!!exporting}>
+          {exporting === "image" ? "Preparing…" : "Download as image"}
+        </button>
+        <button style={styles.downloadBtnAlt} onClick={handleDownloadPdf} disabled={!!exporting}>
+          {exporting === "pdf" ? "Preparing…" : "Download as PDF"}
+        </button>
+      </div>
     </div>
   );
 }
@@ -76,5 +99,7 @@ const styles = {
   wrap: { fontFamily: "system-ui, sans-serif", padding: 24, maxWidth: 460, margin: "0 auto", display: "flex", flexDirection: "column", alignItems: "center", gap: 16 },
   msg: { fontFamily: "system-ui, sans-serif", padding: 24, textAlign: "center" },
   backBtn: { alignSelf: "flex-start", background: "none", border: "none", color: "#3E8E41", fontWeight: 600, cursor: "pointer", padding: 0 },
+  btnRow: { display: "flex", gap: 10 },
   downloadBtn: { background: "#3E8E41", color: "#fff", border: "none", padding: "10px 20px", borderRadius: 8, fontWeight: 700, cursor: "pointer" },
+  downloadBtnAlt: { background: "#FBF6E9", color: "#1A2E1A", border: "1px solid #E4D9B8", padding: "10px 20px", borderRadius: 8, fontWeight: 700, cursor: "pointer" },
 };
