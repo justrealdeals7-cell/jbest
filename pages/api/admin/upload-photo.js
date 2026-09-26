@@ -6,9 +6,18 @@ import { verifyAdminToken } from "../../../lib/auth";
 
 export const config = {
   api: {
-    bodyParser: false, // we stream the raw file body straight to Blob
+    bodyParser: false, // we read the raw file body ourselves, below
   },
 };
+
+function readRawBody(req) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    req.on("data", (chunk) => chunks.push(chunk));
+    req.on("end", () => resolve(Buffer.concat(chunks)));
+    req.on("error", reject);
+  });
+}
 
 export default async function handler(req, res) {
   const payload = verifyAdminToken(req.cookies?.admin_token);
@@ -27,14 +36,29 @@ export default async function handler(req, res) {
   }
 
   try {
-    const blob = await put(filename, req, {
+    // @vercel/blob's put() wants a Buffer/Blob/Web-stream — the raw Node
+    // request stream isn't one of those, so we buffer it first. This was
+    // the bug: passing `req` straight to put() silently failed.
+    const buffer = await readRawBody(req);
+
+    if (!buffer.length) {
+      return res.status(400).json({ error: "Empty upload" });
+    }
+
+    const blob = await put(filename, buffer, {
       access: "public",
       contentType,
       addRandomSuffix: true,
     });
+
     return res.status(200).json({ url: blob.url });
   } catch (err) {
     console.error("upload-photo error", err);
-    return res.status(500).json({ error: "Upload failed" });
+    return res.status(500).json({
+      error: "Upload failed",
+      // Remove this in a later cleanup pass — useful while wiring Blob up,
+      // but no need to expose internals once it's stable.
+      detail: err.message,
+    });
   }
 }

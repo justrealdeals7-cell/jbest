@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { useRouter } from "next/router";
+import Link from "next/link";
 
 export default function AdminDashboard() {
   const router = useRouter();
@@ -88,7 +89,8 @@ export default function AdminDashboard() {
                     {m.status}
                   </span>
                 </td>
-                <td style={styles.td}>
+                <td style={{ ...styles.td, whiteSpace: "nowrap" }}>
+                  <Link href={`/admin/card/${m.id}`} style={styles.viewLink}>View card</Link>
                   {m.status === "active" && (
                     <button style={styles.revokeBtn} onClick={() => handleRevoke(m.id)}>Revoke</button>
                   )}
@@ -144,7 +146,16 @@ function AddMemberForm({ onCreated }) {
       setUploading(false);
 
       if (!uploadRes.ok) {
-        setError("Photo upload failed — member was not created.");
+        let msg = "Photo upload failed — member was not created.";
+        try {
+          const errData = await uploadRes.json();
+          if (errData?.error) {
+            msg = `Photo upload failed: ${errData.error}${errData.detail ? ` (${errData.detail})` : ""}`;
+          }
+        } catch {
+          // response wasn't JSON — keep the generic message
+        }
+        setError(msg);
         setSaving(false);
         return;
       }
@@ -213,6 +224,7 @@ const styles = {
   thumb: { width: 40, height: 40, objectFit: "cover", borderRadius: 6 },
   thumbPlaceholder: { width: 40, height: 40, borderRadius: 6, background: "#F0EAD6" },
   badge: { padding: "2px 8px", borderRadius: 6, fontSize: 12, fontWeight: 700 },
+  viewLink: { marginRight: 10, color: "#3E8E41", fontWeight: 600, textDecoration: "none", fontSize: 13 },
   revokeBtn: { background: "#FBEAEA", color: "#8A1F1F", border: "1px solid #E4B8B8", borderRadius: 6, padding: "4px 10px", cursor: "pointer" },
   formGrid: { display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 8, background: "#FBF6E9", padding: 16, borderRadius: 10, marginBottom: 16, alignItems: "start" },
   input: { padding: 8, borderRadius: 6, border: "1px solid #E4D9B8" },

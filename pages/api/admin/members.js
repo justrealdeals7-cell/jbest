@@ -1,4 +1,4 @@
-// /api/admin/members — GET (list), POST (create), PATCH (edit/revoke)
+// /api/admin/members — GET (list, or single via ?id=), POST (create), PATCH (edit/revoke)
 // Auth: reads the admin_token httpOnly cookie set by /api/admin/login.
 import { sql } from "../../../lib/db";
 import { verifyAdminToken } from "../../../lib/auth";
@@ -25,6 +25,14 @@ export default async function handler(req, res) {
   }
 
   if (req.method === "GET") {
+    const { id } = req.query;
+
+    if (id) {
+      const rows = await sql`SELECT * FROM members WHERE id = ${id} LIMIT 1`;
+      if (rows.length === 0) return res.status(404).json({ error: "Not found" });
+      return res.status(200).json({ member: rows[0] });
+    }
+
     const rows = await sql`SELECT * FROM members ORDER BY created_at DESC LIMIT 200`;
     return res.status(200).json({ members: rows });
   }
