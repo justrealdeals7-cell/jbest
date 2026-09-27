@@ -10,90 +10,6 @@ function extractRegNo(text) {
   return parts.length > 0 ? parts[parts.length - 1] : trimmed;
 }
 
-// ---------------------------------------------------------------------
-// Browser camera acquisition — one explicit fallback chain instead of a
-// single constraint that either works or silently doesn't.
-//
-// `facingMode: { ideal: "environment" }` (the old config) is a *hint*,
-// not a requirement — Chrome is allowed to ignore it, and on phones with
-// more than one rear camera (wide + ultra-wide, common on modern
-// Android) it's a known source of getUserMedia picking an unexpected
-// camera or failing outright with OverconstrainedError. That failure is
-// what was surfacing as "camera worked once, then just blank" — the
-// constraint that happened to resolve to a working camera on one load
-// wasn't guaranteed to on the next.
-//
-// This tries, in order: an exact environment-facing camera, a soft hint
-// at one, an explicitly device-picked rear camera by label, then any
-// camera at all — and reports *why* it failed if every attempt fails,
-// instead of one opaque error.
-// ---------------------------------------------------------------------
-async function acquireCameraStream() {
-  if (typeof navigator === "undefined" || !navigator.mediaDevices?.getUserMedia) {
-    const err = new Error("getUserMedia unsupported");
-    err.reason = "unsupported";
-    throw err;
-  }
-
-  const attempts = [
-    { video: { facingMode: { exact: "environment" } } },
-    { video: { facingMode: "environment" } },
-  ];
-  for (const constraints of attempts) {
-    try {
-      return await navigator.mediaDevices.getUserMedia(constraints);
-    } catch (_) {
-      // try the next strategy
-    }
-  }
-
-  // Explicit device pick: ask what cameras exist and choose one whose
-  // label says it's the rear camera, rather than trusting facingMode.
-  try {
-    const devices = await navigator.mediaDevices.enumerateDevices();
-    const rear = devices.find(
-      (d) => d.kind === "videoinput" && /back|rear|environment/i.test(d.label)
-    );
-    if (rear) {
-      try {
-        return await navigator.mediaDevices.getUserMedia({
-          video: { deviceId: { exact: rear.deviceId } },
-        });
-      } catch (_) {
-        // fall through to "any camera"
-      }
-    }
-  } catch (_) {
-    // enumerateDevices needs a prior permission grant on some browsers —
-    // if it fails, just fall through to the last-resort attempt below.
-  }
-
-  // Last resort: whatever camera the device has.
-  try {
-    return await navigator.mediaDevices.getUserMedia({ video: true });
-  } catch (err) {
-    err.reason =
-      err.name === "NotAllowedError" || err.name === "SecurityError"
-        ? "denied"
-        : err.name === "NotFoundError" || err.name === "OverconstrainedError"
-        ? "no-camera"
-        : "error";
-    throw err;
-  }
-}
-
-async function supportsNativeBarcodeDetector() {
-  if (typeof window === "undefined" || !("BarcodeDetector" in window)) return false;
-  try {
-    const formats = await window.BarcodeDetector.getSupportedFormats();
-    return formats.includes("qr_code");
-  } catch (_) {
-    // Some implementations expose the constructor without this static
-    // method — assume support rather than penalize them.
-    return true;
-  }
-}
-
 export default function VerifyScanPage() {
   const router = useRouter();
   const listenerRef = useRef(null); // ML Kit listener handle (native/Capacitor path)
@@ -112,24 +28,11 @@ export default function VerifyScanPage() {
   // starting | scanning | denied | no-camera | unsupported | error
   const [camPhase, setCamPhase] = useState("starting");
 
-  const videoRef = useRef(null); // <video> used by the native BarcodeDetector path
-  const streamRef = useRef(null); // the raw MediaStream backing that video
-  const rafRef = useRef(null); // requestAnimationFrame handle for the detect loop
-  const scanModeRef = useRef(null); // "native" | "html5-qrcode" — read by the detect loop
-  const html5QrRef = useRef(null); // html5-qrcode instance, fallback path only
+  const html5QrRef = useRef(null); // the one html5-qrcode instance for the browser path
   const html5QrRunningRef = useRef(false);
   const startingRef = useRef(false); // prevents overlapping start() calls
   const mountedRef = useRef(true);
   const resolvedRef = useRef(false); // true once a code has been decoded, to ignore any late frames
-  // The native BarcodeDetector path (see below) can be present but
-  // effectively non-functional on some Android Chrome builds — the
-  // camera preview runs fine, `detect()` just never returns a code, with
-  // no thrown error to catch. nativeWatchdogRef fires if it hasn't
-  // decoded anything within a few seconds so we can fall back to
-  // html5-qrcode instead of leaving the user staring at a "scanning"
-  // camera that will never succeed.
-  const nativeWatchdogRef = useRef(null);
-  const nativeFallbackTriedRef = useRef(false);
 
   function goToResult(decodedText) {
     const regNo = extractRegNo(decodedText);
@@ -220,39 +123,24 @@ export default function VerifyScanPage() {
   // ---------------------------------------------------------------------
   // Browser path (visiting the Vercel URL directly, outside the APK).
   //
-  // Two independent scan modes:
-  //  - "native": the browser's own BarcodeDetector reading frames off a
-  //    <video> we control end-to-end (camera acquisition, playback and
-  //    teardown are all our own code, not a 3rd-party library's). This is
-  //    what modern Chrome/Edge on Android use, which is what the report
-  //    of a still-blank camera was coming from.
-  //  - "html5-qrcode": fallback for browsers without BarcodeDetector
-  //    (e.g. Firefox, older Safari). Same acquireCameraStream() fallback
-  //    chain, driven through the library's device-id start() rather than
-  //    a bare facingMode hint.
+  // This used to try the browser's own `BarcodeDetector` first and hand
+  // off to html5-qrcode partway through if that looked stuck. That
+  // hand-off was the actual bug: stopping one getUserMedia stream and
+  // immediately opening a second one on the same device is exactly the
+  // kind of camera-hardware race that produces "flickers, then doesn't
+  // finish, and won't scan again" — and `BarcodeDetector`'s decode
+  // reliability itself varies by device in ways we can't detect
+  // up front anyway.
   //
-  // Teardown for both goes through one function that cannot throw and
-  // always releases the underlying MediaStream tracks directly, so a
-  // failed/partial stop can never leave the camera hardware locked for
-  // the next attempt (the actual cause of "works once, blank after").
+  // So: one path, one library, used the same way on every device. Every
+  // attempt goes through the same start()/stop() calls, so there's no
+  // handoff for the hardware to race against, and a failed attempt
+  // always leaves the UI in a clear state (scanning, or an error with a
+  // working "Try Again") instead of silently stalling.
   // ---------------------------------------------------------------------
 
-  function stopDetectionLoop() {
-    if (rafRef.current != null) {
-      cancelAnimationFrame(rafRef.current);
-      rafRef.current = null;
-    }
-    clearNativeWatchdog();
-  }
-
-  function clearNativeWatchdog() {
-    if (nativeWatchdogRef.current != null) {
-      clearTimeout(nativeWatchdogRef.current);
-      nativeWatchdogRef.current = null;
-    }
-  }
-
-  async function stopHtml5Qrcode() {
+  // Safe to call any number of times, from any state — never throws.
+  async function teardownBrowserCamera() {
     const instance = html5QrRef.current;
     html5QrRef.current = null;
     const wasRunning = html5QrRunningRef.current;
@@ -272,180 +160,70 @@ export default function VerifyScanPage() {
     }
   }
 
-  function releaseStream() {
-    const stream = streamRef.current;
-    streamRef.current = null;
-    if (stream) {
-      try {
-        stream.getTracks().forEach((t) => t.stop());
-      } catch (_) {}
-    }
-    if (videoRef.current) {
-      try {
-        videoRef.current.srcObject = null;
-      } catch (_) {}
-    }
-  }
-
-  // Safe to call any number of times, from any state — never throws,
-  // always leaves the camera hardware genuinely released.
-  async function teardownBrowserCamera() {
-    scanModeRef.current = null;
-    stopDetectionLoop();
-    await stopHtml5Qrcode();
-    releaseStream();
-  }
-
-  function runNativeDetectionLoop(detector) {
-    const video = videoRef.current;
-    const tick = async () => {
-      if (!mountedRef.current || resolvedRef.current || scanModeRef.current !== "native") {
-        return;
-      }
-      if (video && video.readyState >= 2) {
-        try {
-          const codes = await detector.detect(video);
-          if (codes && codes.length > 0 && codes[0].rawValue) {
-            resolvedRef.current = true;
-            const value = codes[0].rawValue;
-            await teardownBrowserCamera();
-            if (mountedRef.current) goToResult(value);
-            return;
-          }
-        } catch (_) {
-          // a transient decode error on one frame — keep scanning
-        }
-      }
-      rafRef.current = requestAnimationFrame(tick);
-    };
-    rafRef.current = requestAnimationFrame(tick);
-  }
-
-  async function startWithNativeDetector(stream) {
-    const video = videoRef.current;
-    video.srcObject = stream;
-    video.muted = true;
-    video.playsInline = true;
-    await video.play();
-    const detector = new window.BarcodeDetector({ formats: ["qr_code"] });
-    scanModeRef.current = "native";
-    runNativeDetectionLoop(detector);
-
-    // Give the native detector a real window to prove it's actually
-    // decoding (not just previewing) before trusting it. On some Android
-    // Chrome builds `BarcodeDetector` exists and the camera opens, but
-    // detect() never returns a result — no error, just silence. If we
-    // hit this timeout without a code, assume that's what's happening
-    // and switch to the html5-qrcode fallback, which doesn't depend on
-    // any device-side barcode model.
-    clearNativeWatchdog();
-    nativeWatchdogRef.current = setTimeout(() => {
-      if (!mountedRef.current || resolvedRef.current) return;
-      if (scanModeRef.current !== "native" || nativeFallbackTriedRef.current) return;
-      nativeFallbackTriedRef.current = true;
-      switchToHtml5Fallback();
-    }, 3000);
-  }
-
-  // Tears down the (apparently non-functional) native detector path and
-  // starts html5-qrcode in its place, without resetting camPhase back to
-  // "starting" — from the user's view the camera just keeps running.
-  async function switchToHtml5Fallback() {
-    stopDetectionLoop();
-    releaseStream();
-    scanModeRef.current = null;
-    if (!mountedRef.current || resolvedRef.current) return;
-
-    // Handing the camera from the native-detector's stream straight to a
-    // second getUserMedia() call is what produced the "flickers, then
-    // bounces back to the camera overlay" behavior: on many Android
-    // Chrome builds the OS hasn't actually released the hardware the
-    // instant track.stop() returns, so the very next acquisition throws
-    // (usually NotReadableError/OverconstrainedError) and we fell back
-    // to the error UI. Give it a beat, and retry once more before
-    // giving up, instead of failing on the very first race.
-    await new Promise((resolve) => setTimeout(resolve, 350));
-    if (!mountedRef.current || resolvedRef.current) return;
-
-    for (let attempt = 0; attempt < 2; attempt++) {
-      try {
-        await startWithHtml5Qrcode();
-        if (!mountedRef.current) {
-          await teardownBrowserCamera();
-          return;
-        }
-        setCamPhase("scanning");
-        return;
-      } catch (err) {
-        await teardownBrowserCamera();
-        if (!mountedRef.current || resolvedRef.current) return;
-        if (attempt === 0) {
-          await new Promise((resolve) => setTimeout(resolve, 500));
-          continue;
-        }
-        setCamPhase(err?.reason || "error");
-      }
-    }
-  }
-
-  async function startWithHtml5Qrcode() {
-    // This path acquires its own camera (via getCameras()/deviceId
-    // rather than a bare facingMode hint) instead of reusing a stream,
-    // since the library manages its own <video> element internally.
-    const { Html5Qrcode } = await import("html5-qrcode");
-    if (!mountedRef.current) return;
-
-    let cameraId;
-    try {
-      const cameras = await Html5Qrcode.getCameras();
-      const rear = cameras.find((c) => /back|rear|environment/i.test(c.label));
-      cameraId = (rear || cameras[0])?.id;
-    } catch (_) {
-      // fall through — Html5Qrcode.start() can still take a facingMode
-      // constraint object below if device enumeration itself failed
-    }
-
-    const instance = new Html5Qrcode("qr-reader-fallback");
-    html5QrRef.current = instance;
-    scanModeRef.current = "html5-qrcode";
-
-    await instance.start(
-      cameraId || { facingMode: "environment" },
-      { fps: 10 },
-      (decodedText) => {
-        if (resolvedRef.current) return;
-        resolvedRef.current = true;
-        teardownBrowserCamera();
-        if (mountedRef.current) goToResult(decodedText);
-      },
-      () => {} // per-frame scan misses — ignore
-    );
-    html5QrRunningRef.current = true;
-  }
-
   async function startBrowserCamera() {
     if (startingRef.current) return; // ignore repeat taps while a start is already in flight
     startingRef.current = true;
     resolvedRef.current = false;
-    nativeFallbackTriedRef.current = false;
     setCamPhase("starting");
     try {
       await teardownBrowserCamera(); // guarantee a clean slate before starting
 
-      const useNative = await supportsNativeBarcodeDetector();
+      if (typeof navigator === "undefined" || !navigator.mediaDevices?.getUserMedia) {
+        const err = new Error("getUserMedia unsupported");
+        err.reason = "unsupported";
+        throw err;
+      }
+
+      const { Html5Qrcode } = await import("html5-qrcode");
       if (!mountedRef.current) return;
 
-      if (useNative) {
-        const stream = await acquireCameraStream();
-        if (!mountedRef.current) {
-          stream.getTracks().forEach((t) => t.stop());
-          return;
+      const instance = new Html5Qrcode("qr-reader");
+      html5QrRef.current = instance;
+
+      const onDecoded = (decodedText) => {
+        if (resolvedRef.current) return;
+        resolvedRef.current = true;
+        teardownBrowserCamera();
+        if (mountedRef.current) goToResult(decodedText);
+      };
+
+      // qrbox bounds the decode region to roughly the visible scan
+      // frame instead of the full camera frame — on mid/low-end Android
+      // phones, decoding every full-resolution frame is what actually
+      // caused the stutter/"flicker" feel, and cropping to the frame
+      // the user is aiming with is the standard fix, not a guess.
+      const config = { fps: 10, qrbox: { width: 260, height: 260 }, aspectRatio: 1 };
+
+      // `{ facingMode: { exact: "environment" } }` first — the real
+      // rear camera on phones with more than one rear lens. If the
+      // device can't satisfy that exactly, fall back progressively
+      // instead of failing outright. Each attempt reuses the same
+      // start()/stop() cycle, so there's no separate acquisition path
+      // to race against.
+      const attempts = [{ facingMode: { exact: "environment" } }, { facingMode: "environment" }, true];
+      let started = false;
+      let lastErr = null;
+      for (const constraint of attempts) {
+        if (!mountedRef.current) return;
+        try {
+          await instance.start(constraint, config, onDecoded, () => {});
+          started = true;
+          break;
+        } catch (err) {
+          lastErr = err;
         }
-        streamRef.current = stream;
-        await startWithNativeDetector(stream);
-      } else {
-        await startWithHtml5Qrcode();
       }
+      if (!started) {
+        const err = lastErr || new Error("camera start failed");
+        err.reason =
+          err?.name === "NotAllowedError" || err?.name === "SecurityError"
+            ? "denied"
+            : err?.name === "NotFoundError" || err?.name === "OverconstrainedError"
+            ? "no-camera"
+            : "error";
+        throw err;
+      }
+      html5QrRunningRef.current = true;
 
       if (!mountedRef.current) {
         await teardownBrowserCamera();
@@ -533,12 +311,9 @@ export default function VerifyScanPage() {
         </div>
       ) : (
         <div style={styles.reader}>
-          {/* Native BarcodeDetector path: our own <video>, always in the
-              DOM so the ref is stable, just empty until a stream attaches. */}
-          <video ref={videoRef} style={styles.video} playsInline muted />
-          {/* html5-qrcode fallback path: the library owns this div and
-              injects its own <video> into it when active. */}
-          <div id="qr-reader-fallback" style={styles.readerInner} />
+          {/* html5-qrcode owns this div and injects its own <video> into
+              it once the camera starts. */}
+          <div id="qr-reader" style={styles.readerInner} />
 
           {camPhase === "scanning" && <div style={styles.scanFrame} />}
 
@@ -596,7 +371,6 @@ const styles = {
     background: "#000",
     marginBottom: 12,
   },
-  video: { position: "absolute", inset: 0, width: "100%", height: "100%", objectFit: "cover" },
   readerInner: { position: "absolute", inset: 0, width: "100%", height: "100%" },
   camOverlay: {
     position: "absolute",
