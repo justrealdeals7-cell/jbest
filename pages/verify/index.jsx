@@ -355,16 +355,36 @@ export default function VerifyScanPage() {
     releaseStream();
     scanModeRef.current = null;
     if (!mountedRef.current || resolvedRef.current) return;
-    try {
-      await startWithHtml5Qrcode();
-      if (!mountedRef.current) {
-        await teardownBrowserCamera();
+
+    // Handing the camera from the native-detector's stream straight to a
+    // second getUserMedia() call is what produced the "flickers, then
+    // bounces back to the camera overlay" behavior: on many Android
+    // Chrome builds the OS hasn't actually released the hardware the
+    // instant track.stop() returns, so the very next acquisition throws
+    // (usually NotReadableError/OverconstrainedError) and we fell back
+    // to the error UI. Give it a beat, and retry once more before
+    // giving up, instead of failing on the very first race.
+    await new Promise((resolve) => setTimeout(resolve, 350));
+    if (!mountedRef.current || resolvedRef.current) return;
+
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        await startWithHtml5Qrcode();
+        if (!mountedRef.current) {
+          await teardownBrowserCamera();
+          return;
+        }
+        setCamPhase("scanning");
         return;
+      } catch (err) {
+        await teardownBrowserCamera();
+        if (!mountedRef.current || resolvedRef.current) return;
+        if (attempt === 0) {
+          await new Promise((resolve) => setTimeout(resolve, 500));
+          continue;
+        }
+        setCamPhase(err?.reason || "error");
       }
-      setCamPhase("scanning");
-    } catch (err) {
-      await teardownBrowserCamera();
-      if (mountedRef.current) setCamPhase(err?.reason || "error");
     }
   }
 
