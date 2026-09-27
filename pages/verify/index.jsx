@@ -51,10 +51,9 @@ export default function VerifyScanPage() {
     setScanError("");
     setStatus("starting");
 
-    // Always tear down first, even if nothing looks obviously wrong —
-    // reusing a scanner instance that failed to fully clean up last time
-    // is exactly what caused the camera view to sometimes vanish and
-    // never come back. A fresh instance every tap sidesteps that.
+    // Always tear down first — reusing a scanner instance that failed to
+    // fully clean up last time is what caused the camera view to vanish
+    // and never come back in an earlier version of this page.
     await stopScanner();
 
     try {
@@ -64,7 +63,16 @@ export default function VerifyScanPage() {
 
       await instance.start(
         { facingMode: "environment" },
-        { fps: 10, qrbox: 240 },
+        {
+          fps: 10,
+          // An explicit {width, height} keeps the scan box a proper
+          // centered square. A bare number (the previous config) makes
+          // html5-qrcode derive the box from the raw camera aspect
+          // ratio instead, which is what produced the stretched,
+          // off-center bracket.
+          qrbox: { width: 250, height: 250 },
+          aspectRatio: 1.0,
+        },
         (decodedText) => handleDecoded(decodedText),
         () => {} // per-frame scan misses — ignore
       );
@@ -91,8 +99,18 @@ export default function VerifyScanPage() {
       <p style={styles.subtitle}>Scan a member's QR code, or enter their registration number.</p>
 
       {/* Always mounted (never conditionally removed) so html5-qrcode can
-          always find it by id — visibility is controlled with CSS only. */}
-      <div id="qr-reader" style={{ ...styles.reader, height: status === "idle" ? 0 : 280 }} />
+          always find it by id — visibility is controlled with CSS only.
+          Fixed 1:1 aspect ratio keeps the viewfinder itself square, which
+          combined with the square qrbox above keeps the bracket centered
+          regardless of the phone's actual camera aspect ratio. */}
+      <div
+        id="qr-reader"
+        style={{
+          ...styles.reader,
+          height: status === "idle" ? 0 : undefined,
+          aspectRatio: status === "idle" ? undefined : "1 / 1",
+        }}
+      />
 
       {status === "idle" && (
         <button style={styles.scanBtn} onClick={handleStartScan}>📷 Scan QR Code</button>
