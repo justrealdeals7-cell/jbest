@@ -2,33 +2,43 @@ import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/router";
 import { Capacitor } from "@capacitor/core";
 
-// Extracts the registration number whether the QR encodes a full URL,
-// a relative path, or the bare code.
 function extractRegNo(text) {
   const trimmed = text.trim();
   const parts = trimmed.split("/").filter(Boolean);
   return parts.length > 0 ? parts[parts.length - 1] : trimmed;
 }
 
+// Fire-and-forget: sends a scan-lifecycle event to /api/diagnostics/log
+// so it shows up in Vercel's Runtime Logs. Never blocks or throws — a
+// logging failure should never affect scanning itself.
+function logEvent(event, data) {
+  try {
+    fetch("/api/diagnostics/log", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        event,
+        data,
+        ua: typeof navigator !== "undefined" ? navigator.userAgent : "unknown",
+      }),
+    }).catch(() => {});
+  } catch (_) {}
+}
+
 export default function VerifyScanPage() {
   const router = useRouter();
-  const listenerRef = useRef(null); // ML Kit listener handle (native/Capacitor path)
+  const listenerRef = useRef(null);
 
   const [manualCode, setManualCode] = useState("");
-  // idle | preparing | scanning | denied | unsupported
   const [nativeState, setNativeState] = useState("idle");
   const [isNative, setIsNative] = useState(false);
 
-  // starting | scanning | denied | no-camera | unsupported | error
   const [camPhase, setCamPhase] = useState("starting");
   const [camErrorDetail, setCamErrorDetail] = useState("");
-
-  // ── DIAGNOSTIC STATE — this batch's actual purpose. Not a fix; a way
-  // to see what's really happening on a phone where scanning never
-  // triggers, instead of guessing again. ──────────────────────────────
-  const [diag, setDiag] = useState({ constraint: "", resolution: "", fps: "", facing: "" });
+  const [diag, setDiag] = useState({ constraint: "", resolution: "", fps: "", facing: "", focus: "" });
   const [frameCount, setFrameCount] = useState(0);
   const frameFailRef = useRef(0);
+  const scanStartTimeRef = useRef(0);
 
   const html5QrRef = useRef(null);
   const html5QrRunningRef = useRef(false);
@@ -38,11 +48,12 @@ export default function VerifyScanPage() {
 
   function goToResult(decodedText) {
     const regNo = extractRegNo(decodedText);
+    logEvent("scan_success", { frames: frameFailRef.current, regNo });
     router.push(`/verify/${encodeURIComponent(regNo)}`);
   }
 
   // ---------------------------------------------------------------------
-  // Native path (Android APK) — unchanged from batch 14.
+  // Native path (Android APK) — unchanged.
   // ---------------------------------------------------------------------
   async function startNativeScan() {
     setNativeState("preparing");
@@ -108,11 +119,12 @@ export default function VerifyScanPage() {
   }
 
   // ---------------------------------------------------------------------
-  // Browser path — same three-tier constraint fallback as batch 14, now
-  // instrumented so a failing phone shows real numbers instead of a
-  // guess about what might be wrong.
+  // Browser path.
   // ---------------------------------------------------------------------
-  async function teardownBrowserCamera() {
+  async function teardownBrowserCamera(reason) {
+    if (reason && camPhase === "scanning" && !resolvedRef.current) {
+      logEvent("scan_abandoned", { reason, frames: frameFailRef.current, elapsedMs: Date.now() - scanStartTimeRef.current });
+    }
     const instance = html5QrRef.current;
     html5QrRef.current = null;
     const wasRunning = html5QrRunningRef.current;
@@ -135,9 +147,11 @@ export default function VerifyScanPage() {
     resolvedRef.current = false;
     frameFailRef.current = 0;
     setFrameCount(0);
-    setDiag({ constraint: "", resolution: "", fps: "", facing: "" });
+    setDiag({ constraint: "", resolution: "", fps: "", facing: "", focus: "" });
     setCamPhase("starting");
     setCamErrorDetail("");
+    logEvent("scan_start_attempt", {});
+
     try {
       await teardownBrowserCamera();
 
@@ -159,13 +173,6 @@ export default function VerifyScanPage() {
         teardownBrowserCamera();
         if (mountedRef.current) goToResult(decodedText);
       };
-
-      // Counts every processed frame that didn't decode — this is the
-      // key diagnostic. If this number climbs steadily while pointed at
-      // a real QR code, frames ARE reaching the decoder and the problem
-      // is decode quality (focus/lighting/resolution). If it stays at 0,
-      // frames never reach the decoder at all — a completely different,
-      // more fundamental problem than anything tuned in batches 10–14.
       const onFrameFail = () => {
         frameFailRef.current += 1;
       };
@@ -209,45 +216,78 @@ export default function VerifyScanPage() {
         return;
       }
 
-      // Pull the ACTUAL resolved camera settings — not what we asked
-      // for, what the device actually gave us.
+      // Actual resolved camera settings.
       let settings = null;
+      const videoEl = document.querySelector("#qr-reader video");
+      const track = videoEl?.srcObject?.getVideoTracks?.()[0];
       try {
         if (typeof instance.getRunningTrackSettings === "function") {
           settings = instance.getRunningTrackSettings();
+        } else if (track) {
+          settings = track.getSettings();
         }
       } catch (_) {}
-      if (!settings) {
+
+      // The actual fix attempt: your screenshot showed continuous frames
+      // reaching the decoder (550 and climbing) but a visibly blurred
+      // code — that's a focus problem, not a "camera never started"
+      // problem. getUserMedia defaults to a single autofocus pass at
+      // stream start on a lot of Android devices; explicitly requesting
+      // continuous autofocus (where the device supports it) keeps it
+      // refocusing as you move the phone, instead of locking once and
+      // never adjusting again.
+      let focusInfo = { supported: false, applied: false };
+      if (track && typeof track.getCapabilities === "function") {
         try {
-          const videoEl = document.querySelector("#qr-reader video");
-          settings = videoEl?.srcObject?.getVideoTracks?.()[0]?.getSettings?.() || null;
-        } catch (_) {}
+          const caps = track.getCapabilities();
+          focusInfo.supported = Array.isArray(caps.focusMode) && caps.focusMode.includes("continuous");
+          if (focusInfo.supported) {
+            await track.applyConstraints({ advanced: [{ focusMode: "continuous" }] });
+            focusInfo.applied = true;
+          }
+        } catch (err) {
+          focusInfo.error = err?.message;
+        }
       }
-      setDiag({
+
+      const diagData = {
         constraint: usedLabel,
         resolution: settings ? `${settings.width}×${settings.height}` : "unknown",
         fps: settings?.frameRate ? Math.round(settings.frameRate) : "unknown",
         facing: settings?.facingMode || "unknown",
-      });
+        focus: focusInfo.applied ? "continuous (applied)" : focusInfo.supported ? "supported, not applied" : "not supported on this device",
+      };
+      setDiag(diagData);
+      logEvent("scan_camera_started", diagData);
 
+      scanStartTimeRef.current = Date.now();
       setCamPhase("scanning");
     } catch (err) {
       await teardownBrowserCamera();
       if (mountedRef.current) {
         setCamPhase(err?.reason || "error");
         setCamErrorDetail(`${err?.name || "Error"}: ${err?.message || String(err)}`);
+        logEvent("scan_camera_error", { reason: err?.reason || "error", name: err?.name, message: err?.message });
       }
     } finally {
       startingRef.current = false;
     }
   }
 
-  // Flush the frame-failure counter into visible state every 500ms
-  // while scanning — not on every frame, to avoid the state updates
-  // themselves becoming a performance problem on a slow phone.
+  // Flush the frame counter to the UI, and send a heartbeat to the
+  // server log every 5s so a scan that never succeeds still leaves a
+  // trail of "still trying, N frames so far" in Vercel's logs.
   useEffect(() => {
     if (camPhase !== "scanning") return;
-    const id = setInterval(() => setFrameCount(frameFailRef.current), 500);
+    let ticks = 0;
+    const id = setInterval(() => {
+      setFrameCount(frameFailRef.current);
+      ticks += 1;
+      if (ticks % 10 === 0) {
+        // every 5s (500ms * 10)
+        logEvent("scan_heartbeat", { frames: frameFailRef.current, elapsedMs: Date.now() - scanStartTimeRef.current });
+      }
+    }, 500);
     return () => clearInterval(id);
   }, [camPhase]);
 
@@ -255,6 +295,7 @@ export default function VerifyScanPage() {
     mountedRef.current = true;
     const native = Capacitor.isNativePlatform();
     setIsNative(native);
+    logEvent("scan_page_open", { native });
     if (native) {
       startNativeScan();
     } else {
@@ -265,7 +306,7 @@ export default function VerifyScanPage() {
       if (native) {
         cancelNativeScan();
       } else {
-        teardownBrowserCamera();
+        teardownBrowserCamera("page_left");
       }
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -342,21 +383,14 @@ export default function VerifyScanPage() {
             )}
           </div>
 
-          {/* DIAGNOSTIC PANEL — temporary, for tracking down the
-              mobile-vs-desktop discrepancy. Not a fix by itself. */}
           <div style={styles.diagBox}>
-            <p style={styles.diagTitle}>Diagnostics</p>
+            <p style={styles.diagTitle}>Diagnostics (also logged to Vercel)</p>
             <p style={styles.diagLine}>Camera mode: {diag.constraint || "—"}</p>
             <p style={styles.diagLine}>Actual resolution: {diag.resolution || "—"}</p>
             <p style={styles.diagLine}>Frame rate: {diag.fps || "—"} fps</p>
             <p style={styles.diagLine}>Facing mode: {diag.facing || "—"}</p>
+            <p style={styles.diagLine}>Autofocus: {diag.focus || "—"}</p>
             <p style={styles.diagLine}>Frames processed: {frameCount}</p>
-            <p style={styles.diagNote}>
-              If "Frames processed" is climbing while you point at a code, frames ARE
-              reaching the scanner — the problem is decode quality (focus/lighting/distance).
-              If it stays at 0, frames never reach the scanner at all — a different,
-              more fundamental problem. Screenshot this panel while it's stuck and send it.
-            </p>
           </div>
         </>
       )}
@@ -438,5 +472,4 @@ const styles = {
   diagBox: { background: "#1A2E1A", color: "#D7E4D0", borderRadius: 10, padding: "12px 14px", textAlign: "left", fontFamily: "monospace", fontSize: 12, marginBottom: 12 },
   diagTitle: { fontWeight: 700, margin: "0 0 6px", color: "#fff" },
   diagLine: { margin: "2px 0" },
-  diagNote: { margin: "8px 0 0", fontFamily: "system-ui, sans-serif", fontSize: 11, color: "#A8B8A0", lineHeight: 1.4 },
 };
