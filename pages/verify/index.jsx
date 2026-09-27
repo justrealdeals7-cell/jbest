@@ -121,6 +121,15 @@ export default function VerifyScanPage() {
   const startingRef = useRef(false); // prevents overlapping start() calls
   const mountedRef = useRef(true);
   const resolvedRef = useRef(false); // true once a code has been decoded, to ignore any late frames
+  // The native BarcodeDetector path (see below) can be present but
+  // effectively non-functional on some Android Chrome builds — the
+  // camera preview runs fine, `detect()` just never returns a code, with
+  // no thrown error to catch. nativeWatchdogRef fires if it hasn't
+  // decoded anything within a few seconds so we can fall back to
+  // html5-qrcode instead of leaving the user staring at a "scanning"
+  // camera that will never succeed.
+  const nativeWatchdogRef = useRef(null);
+  const nativeFallbackTriedRef = useRef(false);
 
   function goToResult(decodedText) {
     const regNo = extractRegNo(decodedText);
@@ -233,6 +242,14 @@ export default function VerifyScanPage() {
       cancelAnimationFrame(rafRef.current);
       rafRef.current = null;
     }
+    clearNativeWatchdog();
+  }
+
+  function clearNativeWatchdog() {
+    if (nativeWatchdogRef.current != null) {
+      clearTimeout(nativeWatchdogRef.current);
+      nativeWatchdogRef.current = null;
+    }
   }
 
   async function stopHtml5Qrcode() {
@@ -313,6 +330,42 @@ export default function VerifyScanPage() {
     const detector = new window.BarcodeDetector({ formats: ["qr_code"] });
     scanModeRef.current = "native";
     runNativeDetectionLoop(detector);
+
+    // Give the native detector a real window to prove it's actually
+    // decoding (not just previewing) before trusting it. On some Android
+    // Chrome builds `BarcodeDetector` exists and the camera opens, but
+    // detect() never returns a result — no error, just silence. If we
+    // hit this timeout without a code, assume that's what's happening
+    // and switch to the html5-qrcode fallback, which doesn't depend on
+    // any device-side barcode model.
+    clearNativeWatchdog();
+    nativeWatchdogRef.current = setTimeout(() => {
+      if (!mountedRef.current || resolvedRef.current) return;
+      if (scanModeRef.current !== "native" || nativeFallbackTriedRef.current) return;
+      nativeFallbackTriedRef.current = true;
+      switchToHtml5Fallback();
+    }, 3000);
+  }
+
+  // Tears down the (apparently non-functional) native detector path and
+  // starts html5-qrcode in its place, without resetting camPhase back to
+  // "starting" — from the user's view the camera just keeps running.
+  async function switchToHtml5Fallback() {
+    stopDetectionLoop();
+    releaseStream();
+    scanModeRef.current = null;
+    if (!mountedRef.current || resolvedRef.current) return;
+    try {
+      await startWithHtml5Qrcode();
+      if (!mountedRef.current) {
+        await teardownBrowserCamera();
+        return;
+      }
+      setCamPhase("scanning");
+    } catch (err) {
+      await teardownBrowserCamera();
+      if (mountedRef.current) setCamPhase(err?.reason || "error");
+    }
   }
 
   async function startWithHtml5Qrcode() {
@@ -354,6 +407,7 @@ export default function VerifyScanPage() {
     if (startingRef.current) return; // ignore repeat taps while a start is already in flight
     startingRef.current = true;
     resolvedRef.current = false;
+    nativeFallbackTriedRef.current = false;
     setCamPhase("starting");
     try {
       await teardownBrowserCamera(); // guarantee a clean slate before starting
