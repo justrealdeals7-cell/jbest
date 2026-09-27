@@ -29,6 +29,10 @@ jobs:
       - name: Add Capacitor's Android platform
         run: npx cap add android
 
+      - name: Declare camera permission (needed for QR scanning via getUserMedia)
+        run: |
+          sed -i 's#</manifest>#  <uses-permission android:name="android.permission.CAMERA" />\n</manifest>#' android/app/src/main/AndroidManifest.xml
+
       - name: Sync web assets into the Android project
         run: npx cap sync android
 
