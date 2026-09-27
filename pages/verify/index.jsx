@@ -199,19 +199,35 @@ export default function VerifyScanPage() {
       // the user is aiming with is the standard fix, not a guess.
       const config = { fps: 10, qrbox: { width: 260, height: 260 }, aspectRatio: 1 };
 
-      // `{ facingMode: { exact: "environment" } }` first — the real
-      // rear camera on phones with more than one rear lens. If the
-      // device can't satisfy that exactly, fall back progressively
-      // instead of failing outright. Each attempt reuses the same
-      // start()/stop() cycle, so there's no separate acquisition path
-      // to race against.
-      const attempts = [{ facingMode: { exact: "environment" } }, { facingMode: "environment" }, true];
+      // `{ facingMode: ... }` alone (the old config) never asked for a
+      // resolution, so the browser was free to hand back a low default
+      // stream — often not enough pixels-per-module to resolve a dense
+      // QR at real scanning distance, even though the decoder itself
+      // (this library already runs the native ML-Kit-backed detector
+      // and ZXing together by default) is capable. Fixing that means
+      // requesting resolution explicitly via `videoConstraints` — NOT
+      // by adding width/height into the facingMode object passed as
+      // the first start() argument: the library's own camera-config
+      // parser throws if that object has more than one key, so facing
+      // mode and resolution have to travel through separate config
+      // fields, not the same one.
+      const HIGH_RES = { width: { ideal: 1920 }, height: { ideal: 1080 } };
+      const constraintAttempts = [
+        { facingMode: { exact: "environment" }, ...HIGH_RES },
+        { facingMode: "environment", ...HIGH_RES },
+        {}, // last resort: whatever camera/resolution the browser gives us
+      ];
       let started = false;
       let lastErr = null;
-      for (const constraint of attempts) {
+      for (const videoConstraints of constraintAttempts) {
         if (!mountedRef.current) return;
         try {
-          await instance.start(constraint, config, onDecoded, () => {});
+          await instance.start(
+            true, // cameraIdOrConfig — ignored below since videoConstraints is set
+            { ...config, videoConstraints },
+            onDecoded,
+            () => {}
+          );
           started = true;
           break;
         } catch (err) {
