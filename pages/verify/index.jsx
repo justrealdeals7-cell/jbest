@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/router";
 
 // Extracts the registration number whether the QR encodes a full URL,
@@ -11,48 +11,45 @@ function extractRegNo(text) {
 
 export default function VerifyScanPage() {
   const router = useRouter();
+  const scannerRef = useRef(null);
   const [manualCode, setManualCode] = useState("");
+  const [needsTap, setNeedsTap] = useState(false);
 
-  useEffect(() => {
-    let scanner;
-    let cancelled = false;
+  async function startCamera() {
+    setNeedsTap(false);
+    try {
+      const { Html5Qrcode } = await import("html5-qrcode");
 
-    (async () => {
-      // Html5QrcodeScanner (as opposed to the lower-level Html5Qrcode
-      // class used in earlier versions of this page) renders its own
-      // complete, tested UI — permission prompt, camera picker, scan
-      // box sizing, start/stop controls — instead of us reimplementing
-      // that by hand. This is the library's own recommended entry point
-      // for "let someone scan a QR code" and is what fixes the capture
-      // reliability issues the manual version kept running into.
-      const { Html5QrcodeScanner, Html5QrcodeScanType } = await import("html5-qrcode");
-      if (cancelled) return;
+      if (scannerRef.current) {
+        await scannerRef.current.stop().catch(() => {});
+      }
 
-      scanner = new Html5QrcodeScanner(
-        "qr-reader",
-        {
-          fps: 10,
-          qrbox: 250,
-          rememberLastUsedCamera: true,
-          supportedScanTypes: [Html5QrcodeScanType.SCAN_TYPE_CAMERA],
-        },
-        false // verbose logging off
-      );
+      const instance = new Html5Qrcode("qr-reader");
+      scannerRef.current = instance;
 
-      scanner.render(
+      await instance.start(
+        { facingMode: { ideal: "environment" }, width: { ideal: 1280 }, height: { ideal: 720 } },
+        { fps: 10 }, // no qrbox — scans the entire frame, like an ordinary camera scanner
         (decodedText) => {
           const regNo = extractRegNo(decodedText);
-          scanner.clear().catch(() => {});
+          instance.stop().catch(() => {});
           router.push(`/verify/${encodeURIComponent(regNo)}`);
         },
         () => {} // per-frame scan misses — ignore
       );
-    })();
+    } catch (err) {
+      // Some mobile browsers block getUserMedia unless it's triggered by
+      // a direct tap the first time. This surfaces a plain "Open Camera"
+      // button for exactly that case, instead of failing silently.
+      setNeedsTap(true);
+    }
+  }
 
+  useEffect(() => {
+    startCamera();
     return () => {
-      cancelled = true;
-      if (scanner) {
-        scanner.clear().catch(() => {});
+      if (scannerRef.current) {
+        scannerRef.current.stop().catch(() => {});
       }
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -66,11 +63,13 @@ export default function VerifyScanPage() {
   return (
     <div style={styles.wrap}>
       <h1 style={styles.title}>Verify Membership</h1>
-      <p style={styles.subtitle}>Scan a member's QR code, or enter their registration number.</p>
+      <p style={styles.subtitle}>Point the camera at a member's QR code, or enter their registration number.</p>
 
-      {/* Html5QrcodeScanner renders its own UI (permission button,
-          camera picker, scan box, start/stop) inside this container. */}
       <div id="qr-reader" style={styles.reader} />
+
+      {needsTap && (
+        <button style={styles.scanBtn} onClick={startCamera}>📷 Open Camera</button>
+      )}
 
       <form onSubmit={handleManualSubmit} style={styles.manualForm}>
         <input
@@ -89,8 +88,9 @@ const styles = {
   wrap: { fontFamily: "system-ui, sans-serif", padding: "24px 20px", maxWidth: 460, margin: "0 auto", textAlign: "center" },
   title: { fontSize: 22, color: "#1A2E1A", margin: "0 0 4px" },
   subtitle: { color: "#7A7259", fontSize: 14, margin: "0 0 20px" },
-  reader: { width: "100%", marginBottom: 16 },
-  manualForm: { display: "flex", gap: 8, marginTop: 8 },
+  reader: { width: "100%", minHeight: 280, borderRadius: 12, overflow: "hidden", background: "#000", marginBottom: 12 },
+  scanBtn: { background: "#3E8E41", color: "#fff", border: "none", padding: "12px 22px", borderRadius: 10, fontWeight: 700, fontSize: 15, cursor: "pointer", marginBottom: 12 },
+  manualForm: { display: "flex", gap: 8, marginTop: 12 },
   input: { flex: 1, padding: 12, borderRadius: 8, border: "1px solid #E4D9B8", fontSize: 14 },
   button: { background: "#3E8E41", color: "#fff", border: "none", padding: "0 18px", borderRadius: 8, fontWeight: 700, cursor: "pointer" },
 };
