@@ -222,7 +222,8 @@ const styles = {
   title: { fontSize: 22, color: "#1A2E1A", margin: "0 0 4px", textAlign: "center" },
   subtitle: { color: "#7A7259", fontSize: 14, margin: "0 0 20px", textAlign: "center" },
   form: { width: "100%", display: "flex", flexDirection: "column", gap: 10 },
-  input: { padding: 12, borderRadius: 8, border: "1px solid #E4D9B8", fontSize: 14, background: "#FFFDF8" },
+  // 16px — under that, iOS Safari auto-zooms the page on focus.
+  input: { padding: 12, borderRadius: 8, border: "1px solid #E4D9B8", fontSize: 16, background: "#FFFDF8" },
   photoField: { display: "flex", alignItems: "center", gap: 12, marginBottom: 4 },
   previewImg: { width: 64, height: 64, objectFit: "cover", borderRadius: 8, border: "1px solid #E4D9B8" },
   previewPlaceholder: { width: 64, height: 64, borderRadius: 8, background: "#F0EAD6", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 11, color: "#7A7259" },

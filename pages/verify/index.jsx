@@ -24,6 +24,26 @@ export default function VerifyScanPage() {
   // server/client render mismatch instead of reading it directly during render.
   const [isNative, setIsNative] = useState(false);
 
+  // --- Camera lifecycle bookkeeping (browser path) ---------------------
+  // html5-qrcode throws "Cannot stop, scanner is not running or paused."
+  // whenever stop() is called while its internal state isn't actually
+  // SCANNING — e.g. stop() fires while start() is still resolving, or
+  // twice in a row. That throw was happening inside the effect cleanup
+  // (a synchronous function), which crashed the whole React tree — the
+  // "Application error: a client-side exception has occurred" the
+  // console showed. It also left the camera hardware attached to a video
+  // element that never got torn down, which is why the camera would work
+  // once and then just show a blank box on the next attempt: the stream
+  // was still open but orphaned.
+  //
+  // Fix: never trust the library's own state — track it ourselves, only
+  // ever call stop()/clear() through one guarded helper, and always fall
+  // back to manually stopping the underlying MediaStream tracks so the
+  // camera is genuinely released even if html5-qrcode's teardown fails.
+  const runStateRef = useRef("idle"); // idle | starting | running
+  const startingRef = useRef(false); // prevents overlapping start() calls
+  const mountedRef = useRef(true);
+
   function goToResult(decodedText) {
     const regNo = extractRegNo(decodedText);
     router.push(`/verify/${encodeURIComponent(regNo)}`);
@@ -114,38 +134,93 @@ export default function VerifyScanPage() {
 
   // ---------------------------------------------------------------------
   // Browser path (visiting the Vercel URL directly, outside the APK):
-  // unchanged full-frame html5-qrcode scanning.
+  // full-frame html5-qrcode scanning, with a teardown path that can't
+  // throw and can't leave the camera stream dangling.
   // ---------------------------------------------------------------------
+
+  // The one and only place that stops/tears down the browser camera.
+  // Safe to call any number of times, from any state (idle, mid-start,
+  // running) — it never throws.
+  async function safeStopBrowserCamera() {
+    const instance = scannerRef.current;
+    scannerRef.current = null;
+    const wasRunning = runStateRef.current === "running";
+    runStateRef.current = "idle";
+
+    if (instance && wasRunning) {
+      try {
+        await instance.stop();
+      } catch (_) {
+        // Library thought it wasn't running, or the tab/camera changed
+        // state underneath us — we're tearing down regardless, so this
+        // is never fatal, just ignore it.
+      }
+    }
+    if (instance) {
+      try {
+        instance.clear();
+      } catch (_) {}
+    }
+
+    // Belt-and-braces: make sure the actual camera hardware is released
+    // even if the library's own stop() silently no-op'd. This is what
+    // prevents the "works once, blank box after that" symptom — without
+    // it, a failed stop() leaves the MediaStream open and the next
+    // start() call has to fight over the same camera.
+    try {
+      const video = document.querySelector("#qr-reader video");
+      const stream = video && video.srcObject;
+      if (stream && typeof stream.getTracks === "function") {
+        stream.getTracks().forEach((t) => t.stop());
+      }
+    } catch (_) {}
+  }
+
   async function startBrowserCamera() {
+    if (startingRef.current) return; // ignore taps while a start is already in flight
+    startingRef.current = true;
     setNeedsTap(false);
     try {
-      const { Html5Qrcode } = await import("html5-qrcode");
+      await safeStopBrowserCamera(); // guarantee a clean slate before starting
 
-      if (scannerRef.current) {
-        await scannerRef.current.stop().catch(() => {});
-      }
+      const { Html5Qrcode } = await import("html5-qrcode");
+      if (!mountedRef.current) return; // unmounted while the module was loading
 
       const instance = new Html5Qrcode("qr-reader");
       scannerRef.current = instance;
+      runStateRef.current = "starting";
 
       await instance.start(
         { facingMode: { ideal: "environment" }, width: { ideal: 1280 }, height: { ideal: 720 } },
         { fps: 10 }, // no qrbox — scans the entire frame, like an ordinary camera scanner
         (decodedText) => {
-          instance.stop().catch(() => {});
-          goToResult(decodedText);
+          runStateRef.current = "running";
+          safeStopBrowserCamera();
+          if (mountedRef.current) goToResult(decodedText);
         },
         () => {} // per-frame scan misses — ignore
       );
+
+      if (!mountedRef.current) {
+        // Component unmounted while start() was still resolving — don't
+        // leave the camera running behind a page nobody can see.
+        await safeStopBrowserCamera();
+        return;
+      }
+      runStateRef.current = "running";
     } catch (err) {
+      runStateRef.current = "idle";
       // Some mobile browsers block getUserMedia unless it's triggered by
       // a direct tap the first time. This surfaces a plain "Open Camera"
       // button for exactly that case, instead of failing silently.
-      setNeedsTap(true);
+      if (mountedRef.current) setNeedsTap(true);
+    } finally {
+      startingRef.current = false;
     }
   }
 
   useEffect(() => {
+    mountedRef.current = true;
     const native = Capacitor.isNativePlatform();
     setIsNative(native);
     if (native) {
@@ -154,10 +229,11 @@ export default function VerifyScanPage() {
       startBrowserCamera();
     }
     return () => {
+      mountedRef.current = false;
       if (native) {
         cancelNativeScan();
-      } else if (scannerRef.current) {
-        scannerRef.current.stop().catch(() => {});
+      } else {
+        safeStopBrowserCamera();
       }
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -252,7 +328,10 @@ const styles = {
   scanBtn: { background: "#3E8E41", color: "#fff", border: "none", padding: "12px 22px", borderRadius: 10, fontWeight: 700, fontSize: 15, cursor: "pointer", marginBottom: 12 },
   scanBtnGhost: { background: "transparent", color: "#3E8E41", border: "2px solid #3E8E41", padding: "10px 20px", borderRadius: 10, fontWeight: 700, fontSize: 15, cursor: "pointer", marginBottom: 12 },
   manualForm: { display: "flex", gap: 8, marginTop: 12 },
-  input: { flex: 1, padding: 12, borderRadius: 8, border: "1px solid #E4D9B8", fontSize: 14 },
+  // 16px, not 14 — iOS Safari auto-zooms the whole page in when a focused
+  // input's font-size is under 16px, which reads as "the site jumps
+  // around / isn't optimized for mobile" the moment someone taps in.
+  input: { flex: 1, padding: 12, borderRadius: 8, border: "1px solid #E4D9B8", fontSize: 16 },
   button: { background: "#3E8E41", color: "#fff", border: "none", padding: "0 18px", borderRadius: 8, fontWeight: 700, cursor: "pointer" },
   // Native scan overlay: transparent so the real camera preview (drawn by
   // the OS behind the WebView) shows through everywhere except the frame.

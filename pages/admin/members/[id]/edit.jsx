@@ -108,7 +108,8 @@ const styles = {
   subtitle: { color: "#7A7259", fontSize: 13, margin: "0 0 16px" },
   msg: { fontFamily: "system-ui, sans-serif", padding: 24, textAlign: "center" },
   form: { display: "flex", flexDirection: "column", gap: 10 },
-  input: { padding: 12, borderRadius: 8, border: "1px solid #E4D9B8", fontSize: 14, background: "#FFFDF8" },
+  // 16px — under that, iOS Safari auto-zooms the page on focus.
+  input: { padding: 12, borderRadius: 8, border: "1px solid #E4D9B8", fontSize: 16, background: "#FFFDF8" },
   error: { color: "#8A1F1F", fontSize: 13, margin: 0 },
   submitBtn: { background: "#3E8E41", color: "#fff", border: "none", padding: 14, borderRadius: 8, fontWeight: 700, fontSize: 15, cursor: "pointer", marginTop: 8 },
 };
