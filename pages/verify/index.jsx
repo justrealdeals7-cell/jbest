@@ -17,26 +17,24 @@ export default function VerifyScanPage() {
   const [manualCode, setManualCode] = useState("");
   // idle | preparing | scanning | denied | unsupported
   const [nativeState, setNativeState] = useState("idle");
-  // Starts false on both server and first client render (Capacitor.isNativePlatform()
-  // only knows the real answer once the native runtime's `window.Capacitor` exists),
-  // then flips right after mount if we're actually inside the wrapped app — avoids a
-  // server/client render mismatch instead of reading it directly during render.
   const [isNative, setIsNative] = useState(false);
 
-  // Browser-path camera state, surfaced directly to the UI so "blank" is
-  // never a possible state — every phase has its own visible message.
   // starting | scanning | denied | no-camera | unsupported | error
   const [camPhase, setCamPhase] = useState("starting");
-  // The exact browser-reported error (name + message), shown on screen
-  // in the error states below — so a failed attempt tells us precisely
-  // what happened instead of a generic message that can't be acted on.
   const [camErrorDetail, setCamErrorDetail] = useState("");
 
-  const html5QrRef = useRef(null); // the one html5-qrcode instance for the browser path
+  // ── DIAGNOSTIC STATE — this batch's actual purpose. Not a fix; a way
+  // to see what's really happening on a phone where scanning never
+  // triggers, instead of guessing again. ──────────────────────────────
+  const [diag, setDiag] = useState({ constraint: "", resolution: "", fps: "", facing: "" });
+  const [frameCount, setFrameCount] = useState(0);
+  const frameFailRef = useRef(0);
+
+  const html5QrRef = useRef(null);
   const html5QrRunningRef = useRef(false);
-  const startingRef = useRef(false); // prevents overlapping start() calls
+  const startingRef = useRef(false);
   const mountedRef = useRef(true);
-  const resolvedRef = useRef(false); // true once a code has been decoded, to ignore any late frames
+  const resolvedRef = useRef(false);
 
   function goToResult(decodedText) {
     const regNo = extractRegNo(decodedText);
@@ -44,14 +42,7 @@ export default function VerifyScanPage() {
   }
 
   // ---------------------------------------------------------------------
-  // Native path (Android APK): the wrapped app is a WebView loading this
-  // page remotely, and browser-style getUserMedia() inside that WebView
-  // has no permission UI wired up by default — the video stream never
-  // actually starts, which is why scans never decoded no matter how the
-  // scanning config was tuned. The fix isn't more JS tuning, it's using
-  // the platform's own camera instead of the page trying to grab it:
-  // @capacitor-mlkit/barcode-scanning opens a real native camera (Google
-  // ML Kit) behind the WebView and hands back decoded text directly.
+  // Native path (Android APK) — unchanged from batch 14.
   // ---------------------------------------------------------------------
   async function startNativeScan() {
     setNativeState("preparing");
@@ -73,9 +64,6 @@ export default function VerifyScanPage() {
         return;
       }
 
-      // First run on a given device downloads ML Kit's small on-device
-      // model via Play Services — usually instant if it's already
-      // cached, but can take a moment the very first time.
       const { available } = await BarcodeScanner.isGoogleBarcodeScannerModuleAvailable();
       if (!available) {
         await BarcodeScanner.installGoogleBarcodeScannerModule();
@@ -91,9 +79,6 @@ export default function VerifyScanPage() {
       });
       listenerRef.current = listener;
 
-      // The plugin renders the real camera behind the WebView, so the
-      // page itself has to get out of the way visually — see the global
-      // style block below for what stays visible.
       document.body.classList.add("barcode-scanner-active");
       setNativeState("scanning");
       await BarcodeScanner.startScan();
@@ -110,9 +95,7 @@ export default function VerifyScanPage() {
         listenerRef.current = null;
       }
       await BarcodeScanner.stopScan();
-    } catch (_) {
-      // scanner may not have fully started yet — nothing to clean up
-    }
+    } catch (_) {}
     document.body.classList.remove("barcode-scanner-active");
     setNativeState("idle");
   }
@@ -125,25 +108,10 @@ export default function VerifyScanPage() {
   }
 
   // ---------------------------------------------------------------------
-  // Browser path (visiting the Vercel URL directly, outside the APK).
-  //
-  // This used to try the browser's own `BarcodeDetector` first and hand
-  // off to html5-qrcode partway through if that looked stuck. That
-  // hand-off was the actual bug: stopping one getUserMedia stream and
-  // immediately opening a second one on the same device is exactly the
-  // kind of camera-hardware race that produces "flickers, then doesn't
-  // finish, and won't scan again" — and `BarcodeDetector`'s decode
-  // reliability itself varies by device in ways we can't detect
-  // up front anyway.
-  //
-  // So: one path, one library, used the same way on every device. Every
-  // attempt goes through the same start()/stop() calls, so there's no
-  // handoff for the hardware to race against, and a failed attempt
-  // always leaves the UI in a clear state (scanning, or an error with a
-  // working "Try Again") instead of silently stalling.
+  // Browser path — same three-tier constraint fallback as batch 14, now
+  // instrumented so a failing phone shows real numbers instead of a
+  // guess about what might be wrong.
   // ---------------------------------------------------------------------
-
-  // Safe to call any number of times, from any state — never throws.
   async function teardownBrowserCamera() {
     const instance = html5QrRef.current;
     html5QrRef.current = null;
@@ -152,10 +120,7 @@ export default function VerifyScanPage() {
     if (instance && wasRunning) {
       try {
         await instance.stop();
-      } catch (_) {
-        // Library thought it wasn't running — we're tearing down
-        // regardless, so this is never fatal.
-      }
+      } catch (_) {}
     }
     if (instance) {
       try {
@@ -165,13 +130,16 @@ export default function VerifyScanPage() {
   }
 
   async function startBrowserCamera() {
-    if (startingRef.current) return; // ignore repeat taps while a start is already in flight
+    if (startingRef.current) return;
     startingRef.current = true;
     resolvedRef.current = false;
+    frameFailRef.current = 0;
+    setFrameCount(0);
+    setDiag({ constraint: "", resolution: "", fps: "", facing: "" });
     setCamPhase("starting");
     setCamErrorDetail("");
     try {
-      await teardownBrowserCamera(); // guarantee a clean slate before starting
+      await teardownBrowserCamera();
 
       if (typeof navigator === "undefined" || !navigator.mediaDevices?.getUserMedia) {
         const err = new Error("getUserMedia unsupported");
@@ -192,43 +160,33 @@ export default function VerifyScanPage() {
         if (mountedRef.current) goToResult(decodedText);
       };
 
-      // qrbox bounds the decode region to roughly the visible scan
-      // frame instead of the full camera frame — on mid/low-end Android
-      // phones, decoding every full-resolution frame is what actually
-      // caused the stutter/"flicker" feel, and cropping to the frame
-      // the user is aiming with is the standard fix, not a guess.
-      const config = { fps: 10, qrbox: { width: 260, height: 260 }, aspectRatio: 1 };
+      // Counts every processed frame that didn't decode — this is the
+      // key diagnostic. If this number climbs steadily while pointed at
+      // a real QR code, frames ARE reaching the decoder and the problem
+      // is decode quality (focus/lighting/resolution). If it stays at 0,
+      // frames never reach the decoder at all — a completely different,
+      // more fundamental problem than anything tuned in batches 10–14.
+      const onFrameFail = () => {
+        frameFailRef.current += 1;
+      };
 
-      // `{ facingMode: ... }` alone (the old config) never asked for a
-      // resolution, so the browser was free to hand back a low default
-      // stream — often not enough pixels-per-module to resolve a dense
-      // QR at real scanning distance, even though the decoder itself
-      // (this library already runs the native ML-Kit-backed detector
-      // and ZXing together by default) is capable. Fixing that means
-      // requesting resolution explicitly via `videoConstraints` — NOT
-      // by adding width/height into the facingMode object passed as
-      // the first start() argument: the library's own camera-config
-      // parser throws if that object has more than one key, so facing
-      // mode and resolution have to travel through separate config
-      // fields, not the same one.
+      const config = { fps: 10, qrbox: { width: 260, height: 260 }, aspectRatio: 1 };
       const HIGH_RES = { width: { ideal: 1920 }, height: { ideal: 1080 } };
       const constraintAttempts = [
-        { facingMode: { exact: "environment" }, ...HIGH_RES },
-        { facingMode: "environment", ...HIGH_RES },
-        {}, // last resort: whatever camera/resolution the browser gives us
+        { label: "exact-environment + 1080p", constraints: { facingMode: { exact: "environment" }, ...HIGH_RES } },
+        { label: "environment + 1080p", constraints: { facingMode: "environment", ...HIGH_RES } },
+        { label: "browser default", constraints: {} },
       ];
+
       let started = false;
       let lastErr = null;
-      for (const videoConstraints of constraintAttempts) {
+      let usedLabel = "";
+      for (const attempt of constraintAttempts) {
         if (!mountedRef.current) return;
         try {
-          await instance.start(
-            true, // cameraIdOrConfig — ignored below since videoConstraints is set
-            { ...config, videoConstraints },
-            onDecoded,
-            () => {}
-          );
+          await instance.start(true, { ...config, videoConstraints: attempt.constraints }, onDecoded, onFrameFail);
           started = true;
+          usedLabel = attempt.label;
           break;
         } catch (err) {
           lastErr = err;
@@ -250,20 +208,48 @@ export default function VerifyScanPage() {
         await teardownBrowserCamera();
         return;
       }
+
+      // Pull the ACTUAL resolved camera settings — not what we asked
+      // for, what the device actually gave us.
+      let settings = null;
+      try {
+        if (typeof instance.getRunningTrackSettings === "function") {
+          settings = instance.getRunningTrackSettings();
+        }
+      } catch (_) {}
+      if (!settings) {
+        try {
+          const videoEl = document.querySelector("#qr-reader video");
+          settings = videoEl?.srcObject?.getVideoTracks?.()[0]?.getSettings?.() || null;
+        } catch (_) {}
+      }
+      setDiag({
+        constraint: usedLabel,
+        resolution: settings ? `${settings.width}×${settings.height}` : "unknown",
+        fps: settings?.frameRate ? Math.round(settings.frameRate) : "unknown",
+        facing: settings?.facingMode || "unknown",
+      });
+
       setCamPhase("scanning");
     } catch (err) {
       await teardownBrowserCamera();
       if (mountedRef.current) {
         setCamPhase(err?.reason || "error");
-        // The raw name + message from the browser/library — this is
-        // what actually tells us what's failing on a given phone
-        // instead of another guess.
         setCamErrorDetail(`${err?.name || "Error"}: ${err?.message || String(err)}`);
       }
     } finally {
       startingRef.current = false;
     }
   }
+
+  // Flush the frame-failure counter into visible state every 500ms
+  // while scanning — not on every frame, to avoid the state updates
+  // themselves becoming a performance problem on a slow phone.
+  useEffect(() => {
+    if (camPhase !== "scanning") return;
+    const id = setInterval(() => setFrameCount(frameFailRef.current), 500);
+    return () => clearInterval(id);
+  }, [camPhase]);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -337,27 +323,42 @@ export default function VerifyScanPage() {
           )}
         </div>
       ) : (
-        <div style={styles.reader}>
-          {/* html5-qrcode owns this div and injects its own <video> into
-              it once the camera starts. */}
-          <div id="qr-reader" style={styles.readerInner} />
+        <>
+          <div style={styles.reader}>
+            <div id="qr-reader" style={styles.readerInner} />
+            {camPhase === "scanning" && <div style={styles.scanFrame} />}
+            {camPhase !== "scanning" && (
+              <div style={styles.camOverlay}>
+                <p style={styles.hintTextLight}>{camMessages[camPhase] || camMessages.error}</p>
+                {camErrorDetail && camPhase !== "starting" && (
+                  <p style={styles.errorDetail}>{camErrorDetail}</p>
+                )}
+                {camPhase !== "starting" && (
+                  <button style={styles.scanBtn} onClick={startBrowserCamera} type="button">
+                    📷 Try Again
+                  </button>
+                )}
+              </div>
+            )}
+          </div>
 
-          {camPhase === "scanning" && <div style={styles.scanFrame} />}
-
-          {camPhase !== "scanning" && (
-            <div style={styles.camOverlay}>
-              <p style={styles.hintTextLight}>{camMessages[camPhase] || camMessages.error}</p>
-              {camErrorDetail && camPhase !== "starting" && (
-                <p style={styles.errorDetail}>{camErrorDetail}</p>
-              )}
-              {camPhase !== "starting" && (
-                <button style={styles.scanBtn} onClick={startBrowserCamera} type="button">
-                  📷 Try Again
-                </button>
-              )}
-            </div>
-          )}
-        </div>
+          {/* DIAGNOSTIC PANEL — temporary, for tracking down the
+              mobile-vs-desktop discrepancy. Not a fix by itself. */}
+          <div style={styles.diagBox}>
+            <p style={styles.diagTitle}>Diagnostics</p>
+            <p style={styles.diagLine}>Camera mode: {diag.constraint || "—"}</p>
+            <p style={styles.diagLine}>Actual resolution: {diag.resolution || "—"}</p>
+            <p style={styles.diagLine}>Frame rate: {diag.fps || "—"} fps</p>
+            <p style={styles.diagLine}>Facing mode: {diag.facing || "—"}</p>
+            <p style={styles.diagLine}>Frames processed: {frameCount}</p>
+            <p style={styles.diagNote}>
+              If "Frames processed" is climbing while you point at a code, frames ARE
+              reaching the scanner — the problem is decode quality (focus/lighting/distance).
+              If it stays at 0, frames never reach the scanner at all — a different,
+              more fundamental problem. Screenshot this panel while it's stuck and send it.
+            </p>
+          </div>
+        </>
       )}
 
       <form onSubmit={handleManualSubmit} style={styles.manualForm}>
@@ -370,9 +371,6 @@ export default function VerifyScanPage() {
         <button style={styles.button} type="submit">Check</button>
       </form>
 
-      {/* The ML Kit plugin draws the real camera behind the WebView and
-          makes the WebView background transparent while scanning — so
-          everything on the page has to hide except this overlay. */}
       <style jsx global>{`
         body.barcode-scanner-active {
           visibility: hidden;
@@ -418,13 +416,8 @@ const styles = {
   scanBtn: { background: "#3E8E41", color: "#fff", border: "none", padding: "12px 22px", borderRadius: 10, fontWeight: 700, fontSize: 15, cursor: "pointer", marginBottom: 12 },
   scanBtnGhost: { background: "transparent", color: "#3E8E41", border: "2px solid #3E8E41", padding: "10px 20px", borderRadius: 10, fontWeight: 700, fontSize: 15, cursor: "pointer", marginBottom: 12 },
   manualForm: { display: "flex", gap: 8, marginTop: 12 },
-  // 16px, not 14 — iOS Safari auto-zooms the whole page in when a focused
-  // input's font-size is under 16px, which reads as "the site jumps
-  // around / isn't optimized for mobile" the moment someone taps in.
   input: { flex: 1, padding: 12, borderRadius: 8, border: "1px solid #E4D9B8", fontSize: 16 },
   button: { background: "#3E8E41", color: "#fff", border: "none", padding: "0 18px", borderRadius: 8, fontWeight: 700, cursor: "pointer" },
-  // Native scan overlay: transparent so the real camera preview (drawn by
-  // the OS behind the WebView) shows through everywhere except the frame.
   nativeOverlay: { minHeight: 320, borderRadius: 12, marginBottom: 12, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 16 },
   scanFrame: {
     position: "absolute",
@@ -442,4 +435,8 @@ const styles = {
   hintLight: { color: "#7A7259" },
   hintBox: { background: "#FBF6E9", borderRadius: 12, padding: 16 },
   hintText: { color: "#4A4433", marginBottom: 12 },
+  diagBox: { background: "#1A2E1A", color: "#D7E4D0", borderRadius: 10, padding: "12px 14px", textAlign: "left", fontFamily: "monospace", fontSize: 12, marginBottom: 12 },
+  diagTitle: { fontWeight: 700, margin: "0 0 6px", color: "#fff" },
+  diagLine: { margin: "2px 0" },
+  diagNote: { margin: "8px 0 0", fontFamily: "system-ui, sans-serif", fontSize: 11, color: "#A8B8A0", lineHeight: 1.4 },
 };
