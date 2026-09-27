@@ -27,6 +27,10 @@ export default function VerifyScanPage() {
   // never a possible state — every phase has its own visible message.
   // starting | scanning | denied | no-camera | unsupported | error
   const [camPhase, setCamPhase] = useState("starting");
+  // The exact browser-reported error (name + message), shown on screen
+  // in the error states below — so a failed attempt tells us precisely
+  // what happened instead of a generic message that can't be acted on.
+  const [camErrorDetail, setCamErrorDetail] = useState("");
 
   const html5QrRef = useRef(null); // the one html5-qrcode instance for the browser path
   const html5QrRunningRef = useRef(false);
@@ -165,6 +169,7 @@ export default function VerifyScanPage() {
     startingRef.current = true;
     resolvedRef.current = false;
     setCamPhase("starting");
+    setCamErrorDetail("");
     try {
       await teardownBrowserCamera(); // guarantee a clean slate before starting
 
@@ -232,7 +237,13 @@ export default function VerifyScanPage() {
       setCamPhase("scanning");
     } catch (err) {
       await teardownBrowserCamera();
-      if (mountedRef.current) setCamPhase(err?.reason || "error");
+      if (mountedRef.current) {
+        setCamPhase(err?.reason || "error");
+        // The raw name + message from the browser/library — this is
+        // what actually tells us what's failing on a given phone
+        // instead of another guess.
+        setCamErrorDetail(`${err?.name || "Error"}: ${err?.message || String(err)}`);
+      }
     } finally {
       startingRef.current = false;
     }
@@ -320,6 +331,9 @@ export default function VerifyScanPage() {
           {camPhase !== "scanning" && (
             <div style={styles.camOverlay}>
               <p style={styles.hintTextLight}>{camMessages[camPhase] || camMessages.error}</p>
+              {camErrorDetail && camPhase !== "starting" && (
+                <p style={styles.errorDetail}>{camErrorDetail}</p>
+              )}
               {camPhase !== "starting" && (
                 <button style={styles.scanBtn} onClick={startBrowserCamera} type="button">
                   📷 Try Again
@@ -384,6 +398,7 @@ const styles = {
     background: "rgba(0,0,0,0.55)",
   },
   hintTextLight: { color: "#fff", fontSize: 14, margin: 0, textAlign: "center" },
+  errorDetail: { color: "#F5C2C2", fontSize: 11, margin: "-4px 0 0", textAlign: "center", fontFamily: "monospace", wordBreak: "break-word", maxWidth: "100%" },
   scanBtn: { background: "#3E8E41", color: "#fff", border: "none", padding: "12px 22px", borderRadius: 10, fontWeight: 700, fontSize: 15, cursor: "pointer", marginBottom: 12 },
   scanBtnGhost: { background: "transparent", color: "#3E8E41", border: "2px solid #3E8E41", padding: "10px 20px", borderRadius: 10, fontWeight: 700, fontSize: 15, cursor: "pointer", marginBottom: 12 },
   manualForm: { display: "flex", gap: 8, marginTop: 12 },
