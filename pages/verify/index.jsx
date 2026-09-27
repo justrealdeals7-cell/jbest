@@ -42,15 +42,22 @@ export default function VerifyScanPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Extracts the registration number whether the QR encodes:
+  //  - a full URL like https://app.example.com/verify/YPM-2026...
+  //  - a relative path like /verify/YPM-2026...
+  //  - or just the bare code, YPM-2026...
+  // The previous version used `new URL(text)` and fell through to using
+  // the ENTIRE string (including "/verify/" itself) as the reg number
+  // whenever the QR held a relative path instead of an absolute URL —
+  // which silently broke every scan into a lookup for the wrong string.
+  function extractRegNo(text) {
+    const trimmed = text.trim();
+    const parts = trimmed.split("/").filter(Boolean);
+    return parts.length > 0 ? parts[parts.length - 1] : trimmed;
+  }
+
   function handleDecoded(text) {
-    let regNo = text.trim();
-    try {
-      const url = new URL(text);
-      const parts = url.pathname.split("/").filter(Boolean);
-      regNo = parts[parts.length - 1] || regNo;
-    } catch {
-      // not a URL — treat the raw scanned text as the reg number
-    }
+    const regNo = extractRegNo(text);
     if (scannerRef.current) {
       scannerRef.current.stop().catch(() => {});
     }

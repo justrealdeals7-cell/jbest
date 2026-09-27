@@ -9,10 +9,12 @@ export default async function handler(req, res) {
   }
 
   try {
+    // Case-insensitive: someone typing a reg number by hand may not match
+    // the stored uppercase-suffix casing exactly.
     const rows = await sql`
       SELECT reg_no, full_name, status, reg_state, reg_lga, ward, issued_at, revoked_at
       FROM members
-      WHERE reg_no = ${regNo}
+      WHERE upper(reg_no) = upper(${regNo})
       LIMIT 1
     `;
 

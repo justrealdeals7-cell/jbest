@@ -54,6 +54,32 @@ export default function CardViewPage() {
     setExporting("");
   }
 
+  function handlePrint() {
+    if (!cardRef.current) return;
+    const printWindow = window.open("", "_blank");
+    if (!printWindow) {
+      alert("Please allow pop-ups for this site to print.");
+      return;
+    }
+    printWindow.document.write(`
+      <html>
+        <head>
+          <title>${member.reg_no}</title>
+          <style>
+            body { margin: 0; display: flex; justify-content: center; padding: 24px; font-family: system-ui, sans-serif; }
+            @media print { body { padding: 0; } }
+          </style>
+        </head>
+        <body>${cardRef.current.outerHTML}</body>
+      </html>
+    `);
+    printWindow.document.close();
+    printWindow.onload = () => {
+      printWindow.focus();
+      printWindow.print();
+    };
+  }
+
   if (loading) return <p style={styles.msg}>Loading…</p>;
   if (!member) return <p style={styles.msg}>Member not found.</p>;
 
@@ -84,6 +110,7 @@ export default function CardViewPage() {
           {exporting === "pdf" ? "Preparing…" : "Download as PDF"}
         </button>
       </div>
+      <button style={styles.printBtn} onClick={handlePrint}>Print ID</button>
     </div>
   );
 }
@@ -102,4 +129,5 @@ const styles = {
   btnRow: { display: "flex", gap: 10 },
   downloadBtn: { background: "#3E8E41", color: "#fff", border: "none", padding: "10px 20px", borderRadius: 8, fontWeight: 700, cursor: "pointer" },
   downloadBtnAlt: { background: "#FBF6E9", color: "#1A2E1A", border: "1px solid #E4D9B8", padding: "10px 20px", borderRadius: 8, fontWeight: 700, cursor: "pointer" },
+  printBtn: { background: "#1A2E1A", color: "#fff", border: "none", padding: "10px 24px", borderRadius: 8, fontWeight: 700, cursor: "pointer" },
 };
