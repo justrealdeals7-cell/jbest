@@ -1,6 +1,6 @@
 {
   "name": "youthparty-cbm",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "private": true,
   "scripts": {
     "dev": "next dev",
@@ -24,6 +24,9 @@
     "react-dom": "^18.2.0"
   },
   "devDependencies": {
+    "@capacitor/android": "^6.1.2",
+    "@capacitor/cli": "^6.1.2",
+    "@capacitor/core": "^6.1.2",
     "dotenv": "^16.4.5"
   }
 }

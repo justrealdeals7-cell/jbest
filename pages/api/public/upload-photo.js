@@ -1,8 +1,6 @@
 // POST /api/public/upload-photo — used by the public self-registration form.
-// No admin auth (this is meant to be called by anyone registering), but
-// still validated: image types only, 5MB cap. If this gets abused in
-// practice, add rate limiting (e.g. Vercel's built-in or a simple IP-based
-// counter in Neon) before anything else.
+// No admin auth (anyone registering needs to call this), but still
+// validated: image types only, 5MB cap.
 import { put } from "@vercel/blob";
 
 export const config = {

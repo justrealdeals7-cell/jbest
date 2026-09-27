@@ -113,9 +113,9 @@ export default function RegisterPage() {
             member={{
               ...member,
               phone_masked: maskPhone(member.phone),
-              issued_at: new Date(member.issued_at).toLocaleDateString("en-GB", {
-                day: "numeric", month: "short", year: "numeric",
-              }),
+              issued_at: member.issued_at
+                ? new Date(member.issued_at).toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" })
+                : "",
             }}
             verifyBaseUrl={process.env.NEXT_PUBLIC_VERIFY_BASE_URL || ""}
           />
