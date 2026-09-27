@@ -42,19 +42,34 @@ export default async function handler(req, res) {
       return res.status(200).json({ member: rows[0] });
     }
 
+    // Pagination: page is 1-based; pageSize is clamped to a sane range so
+    // a crafted query string can't force the DB to return everything.
+    const page = Math.max(1, parseInt(req.query.page, 10) || 1);
+    const pageSize = Math.min(100, Math.max(1, parseInt(req.query.pageSize, 10) || 20));
+    const offset = (page - 1) * pageSize;
+
     if (search && search.trim()) {
       const term = `%${search.trim()}%`;
       const rows = await sql`
         SELECT * FROM members
         WHERE full_name ILIKE ${term} OR reg_no ILIKE ${term}
            OR reg_state ILIKE ${term} OR reg_lga ILIKE ${term}
-        ORDER BY created_at DESC LIMIT 200
+        ORDER BY created_at DESC
+        LIMIT ${pageSize} OFFSET ${offset}
       `;
-      return res.status(200).json({ members: rows });
+      const [{ count }] = await sql`
+        SELECT COUNT(*)::int AS count FROM members
+        WHERE full_name ILIKE ${term} OR reg_no ILIKE ${term}
+           OR reg_state ILIKE ${term} OR reg_lga ILIKE ${term}
+      `;
+      return res.status(200).json({ members: rows, total: count, page, pageSize });
     }
 
-    const rows = await sql`SELECT * FROM members ORDER BY created_at DESC LIMIT 200`;
-    return res.status(200).json({ members: rows });
+    const rows = await sql`
+      SELECT * FROM members ORDER BY created_at DESC LIMIT ${pageSize} OFFSET ${offset}
+    `;
+    const [{ count }] = await sql`SELECT COUNT(*)::int AS count FROM members`;
+    return res.status(200).json({ members: rows, total: count, page, pageSize });
   }
 
   if (req.method === "POST") {
