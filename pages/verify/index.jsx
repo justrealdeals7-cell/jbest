@@ -8,23 +8,6 @@ function extractRegNo(text) {
   return parts.length > 0 ? parts[parts.length - 1] : trimmed;
 }
 
-// Fire-and-forget: sends a scan-lifecycle event to /api/diagnostics/log
-// so it shows up in Vercel's Runtime Logs. Never blocks or throws — a
-// logging failure should never affect scanning itself.
-function logEvent(event, data) {
-  try {
-    fetch("/api/diagnostics/log", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        event,
-        data,
-        ua: typeof navigator !== "undefined" ? navigator.userAgent : "unknown",
-      }),
-    }).catch(() => {});
-  } catch (_) {}
-}
-
 export default function VerifyScanPage() {
   const router = useRouter();
   const listenerRef = useRef(null);
@@ -33,12 +16,9 @@ export default function VerifyScanPage() {
   const [nativeState, setNativeState] = useState("idle");
   const [isNative, setIsNative] = useState(false);
 
+  // starting | scanning | denied | no-camera | unsupported | error
   const [camPhase, setCamPhase] = useState("starting");
   const [camErrorDetail, setCamErrorDetail] = useState("");
-  const [diag, setDiag] = useState({ constraint: "", resolution: "", fps: "", facing: "", focus: "" });
-  const [frameCount, setFrameCount] = useState(0);
-  const frameFailRef = useRef(0);
-  const scanStartTimeRef = useRef(0);
 
   const html5QrRef = useRef(null);
   const html5QrRunningRef = useRef(false);
@@ -48,12 +28,11 @@ export default function VerifyScanPage() {
 
   function goToResult(decodedText) {
     const regNo = extractRegNo(decodedText);
-    logEvent("scan_success", { frames: frameFailRef.current, regNo });
     router.push(`/verify/${encodeURIComponent(regNo)}`);
   }
 
   // ---------------------------------------------------------------------
-  // Native path (Android APK) — unchanged.
+  // Native path (Android APK).
   // ---------------------------------------------------------------------
   async function startNativeScan() {
     setNativeState("preparing");
@@ -121,10 +100,7 @@ export default function VerifyScanPage() {
   // ---------------------------------------------------------------------
   // Browser path.
   // ---------------------------------------------------------------------
-  async function teardownBrowserCamera(reason) {
-    if (reason && camPhase === "scanning" && !resolvedRef.current) {
-      logEvent("scan_abandoned", { reason, frames: frameFailRef.current, elapsedMs: Date.now() - scanStartTimeRef.current });
-    }
+  async function teardownBrowserCamera() {
     const instance = html5QrRef.current;
     html5QrRef.current = null;
     const wasRunning = html5QrRunningRef.current;
@@ -145,12 +121,8 @@ export default function VerifyScanPage() {
     if (startingRef.current) return;
     startingRef.current = true;
     resolvedRef.current = false;
-    frameFailRef.current = 0;
-    setFrameCount(0);
-    setDiag({ constraint: "", resolution: "", fps: "", facing: "", focus: "" });
     setCamPhase("starting");
     setCamErrorDetail("");
-    logEvent("scan_start_attempt", {});
 
     try {
       await teardownBrowserCamera();
@@ -173,27 +145,22 @@ export default function VerifyScanPage() {
         teardownBrowserCamera();
         if (mountedRef.current) goToResult(decodedText);
       };
-      const onFrameFail = () => {
-        frameFailRef.current += 1;
-      };
 
       const config = { fps: 10, qrbox: { width: 260, height: 260 }, aspectRatio: 1 };
       const HIGH_RES = { width: { ideal: 1920 }, height: { ideal: 1080 } };
       const constraintAttempts = [
-        { label: "exact-environment + 1080p", constraints: { facingMode: { exact: "environment" }, ...HIGH_RES } },
-        { label: "environment + 1080p", constraints: { facingMode: "environment", ...HIGH_RES } },
-        { label: "browser default", constraints: {} },
+        { facingMode: { exact: "environment" }, ...HIGH_RES },
+        { facingMode: "environment", ...HIGH_RES },
+        {},
       ];
 
       let started = false;
       let lastErr = null;
-      let usedLabel = "";
-      for (const attempt of constraintAttempts) {
+      for (const videoConstraints of constraintAttempts) {
         if (!mountedRef.current) return;
         try {
-          await instance.start(true, { ...config, videoConstraints: attempt.constraints }, onDecoded, onFrameFail);
+          await instance.start(true, { ...config, videoConstraints }, onDecoded, () => {});
           started = true;
-          usedLabel = attempt.label;
           break;
         } catch (err) {
           lastErr = err;
@@ -216,86 +183,38 @@ export default function VerifyScanPage() {
         return;
       }
 
-      // Actual resolved camera settings.
-      let settings = null;
-      const videoEl = document.querySelector("#qr-reader video");
-      const track = videoEl?.srcObject?.getVideoTracks?.()[0];
+      // Request continuous autofocus where the device supports it — a
+      // lot of Android cameras otherwise autofocus once at stream start
+      // and never re-focus as the phone moves into scanning position.
       try {
-        if (typeof instance.getRunningTrackSettings === "function") {
-          settings = instance.getRunningTrackSettings();
-        } else if (track) {
-          settings = track.getSettings();
-        }
-      } catch (_) {}
-
-      // The actual fix attempt: your screenshot showed continuous frames
-      // reaching the decoder (550 and climbing) but a visibly blurred
-      // code — that's a focus problem, not a "camera never started"
-      // problem. getUserMedia defaults to a single autofocus pass at
-      // stream start on a lot of Android devices; explicitly requesting
-      // continuous autofocus (where the device supports it) keeps it
-      // refocusing as you move the phone, instead of locking once and
-      // never adjusting again.
-      let focusInfo = { supported: false, applied: false };
-      if (track && typeof track.getCapabilities === "function") {
-        try {
+        const videoEl = document.querySelector("#qr-reader video");
+        const track = videoEl?.srcObject?.getVideoTracks?.()[0];
+        if (track && typeof track.getCapabilities === "function") {
           const caps = track.getCapabilities();
-          focusInfo.supported = Array.isArray(caps.focusMode) && caps.focusMode.includes("continuous");
-          if (focusInfo.supported) {
+          if (Array.isArray(caps.focusMode) && caps.focusMode.includes("continuous")) {
             await track.applyConstraints({ advanced: [{ focusMode: "continuous" }] });
-            focusInfo.applied = true;
           }
-        } catch (err) {
-          focusInfo.error = err?.message;
         }
+      } catch (_) {
+        // best-effort only — absence of this support isn't fatal
       }
 
-      const diagData = {
-        constraint: usedLabel,
-        resolution: settings ? `${settings.width}×${settings.height}` : "unknown",
-        fps: settings?.frameRate ? Math.round(settings.frameRate) : "unknown",
-        facing: settings?.facingMode || "unknown",
-        focus: focusInfo.applied ? "continuous (applied)" : focusInfo.supported ? "supported, not applied" : "not supported on this device",
-      };
-      setDiag(diagData);
-      logEvent("scan_camera_started", diagData);
-
-      scanStartTimeRef.current = Date.now();
       setCamPhase("scanning");
     } catch (err) {
       await teardownBrowserCamera();
       if (mountedRef.current) {
         setCamPhase(err?.reason || "error");
         setCamErrorDetail(`${err?.name || "Error"}: ${err?.message || String(err)}`);
-        logEvent("scan_camera_error", { reason: err?.reason || "error", name: err?.name, message: err?.message });
       }
     } finally {
       startingRef.current = false;
     }
   }
 
-  // Flush the frame counter to the UI, and send a heartbeat to the
-  // server log every 5s so a scan that never succeeds still leaves a
-  // trail of "still trying, N frames so far" in Vercel's logs.
-  useEffect(() => {
-    if (camPhase !== "scanning") return;
-    let ticks = 0;
-    const id = setInterval(() => {
-      setFrameCount(frameFailRef.current);
-      ticks += 1;
-      if (ticks % 10 === 0) {
-        // every 5s (500ms * 10)
-        logEvent("scan_heartbeat", { frames: frameFailRef.current, elapsedMs: Date.now() - scanStartTimeRef.current });
-      }
-    }, 500);
-    return () => clearInterval(id);
-  }, [camPhase]);
-
   useEffect(() => {
     mountedRef.current = true;
     const native = Capacitor.isNativePlatform();
     setIsNative(native);
-    logEvent("scan_page_open", { native });
     if (native) {
       startNativeScan();
     } else {
@@ -306,7 +225,7 @@ export default function VerifyScanPage() {
       if (native) {
         cancelNativeScan();
       } else {
-        teardownBrowserCamera("page_left");
+        teardownBrowserCamera();
       }
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -364,35 +283,23 @@ export default function VerifyScanPage() {
           )}
         </div>
       ) : (
-        <>
-          <div style={styles.reader}>
-            <div id="qr-reader" style={styles.readerInner} />
-            {camPhase === "scanning" && <div style={styles.scanFrame} />}
-            {camPhase !== "scanning" && (
-              <div style={styles.camOverlay}>
-                <p style={styles.hintTextLight}>{camMessages[camPhase] || camMessages.error}</p>
-                {camErrorDetail && camPhase !== "starting" && (
-                  <p style={styles.errorDetail}>{camErrorDetail}</p>
-                )}
-                {camPhase !== "starting" && (
-                  <button style={styles.scanBtn} onClick={startBrowserCamera} type="button">
-                    📷 Try Again
-                  </button>
-                )}
-              </div>
-            )}
-          </div>
-
-          <div style={styles.diagBox}>
-            <p style={styles.diagTitle}>Diagnostics (also logged to Vercel)</p>
-            <p style={styles.diagLine}>Camera mode: {diag.constraint || "—"}</p>
-            <p style={styles.diagLine}>Actual resolution: {diag.resolution || "—"}</p>
-            <p style={styles.diagLine}>Frame rate: {diag.fps || "—"} fps</p>
-            <p style={styles.diagLine}>Facing mode: {diag.facing || "—"}</p>
-            <p style={styles.diagLine}>Autofocus: {diag.focus || "—"}</p>
-            <p style={styles.diagLine}>Frames processed: {frameCount}</p>
-          </div>
-        </>
+        <div style={styles.reader}>
+          <div id="qr-reader" style={styles.readerInner} />
+          {camPhase === "scanning" && <div style={styles.scanFrame} />}
+          {camPhase !== "scanning" && (
+            <div style={styles.camOverlay}>
+              <p style={styles.hintTextLight}>{camMessages[camPhase] || camMessages.error}</p>
+              {camErrorDetail && camPhase !== "starting" && (
+                <p style={styles.errorDetail}>{camErrorDetail}</p>
+              )}
+              {camPhase !== "starting" && (
+                <button style={styles.scanBtn} onClick={startBrowserCamera} type="button">
+                  📷 Try Again
+                </button>
+              )}
+            </div>
+          )}
+        </div>
       )}
 
       <form onSubmit={handleManualSubmit} style={styles.manualForm}>
@@ -469,7 +376,4 @@ const styles = {
   hintLight: { color: "#7A7259" },
   hintBox: { background: "#FBF6E9", borderRadius: 12, padding: 16 },
   hintText: { color: "#4A4433", marginBottom: 12 },
-  diagBox: { background: "#1A2E1A", color: "#D7E4D0", borderRadius: 10, padding: "12px 14px", textAlign: "left", fontFamily: "monospace", fontSize: 12, marginBottom: 12 },
-  diagTitle: { fontWeight: 700, margin: "0 0 6px", color: "#fff" },
-  diagLine: { margin: "2px 0" },
 };
